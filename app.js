@@ -4,7 +4,7 @@
  * - Login Google: o painel confere o login e a lista de e-mails autorizados (nada disso fica aqui).
  */
 'use strict';
-const APP_VERSAO = '9';
+const APP_VERSAO = '10';
 const CFG = window.HM_CONFIG || {};
 
 /* ================================================================== */
@@ -295,9 +295,9 @@ function tela() {
   // (index.html antigo sem alguma aba não pode travar o app)
   const ap = $('#abaPers'), ar = $('#abaRel');
   if (ap) ap.hidden = !temPersonal(); if (ST.aba === 'pers' && !(ap && temPersonal())) ST.aba = 'novo';
-  if (ar) ar.hidden = !temRelatorios(); if (ST.aba === 'rel' && !(ar && temRelatorios())) ST.aba = 'novo';
+  if (ar) ar.hidden = !(temRelatorios() || temRdv()); if (ST.aba === 'rel' && !(ar && (temRelatorios() || temRdv()))) ST.aba = 'novo';
   document.querySelectorAll('[data-aba]').forEach(b => b.setAttribute('aria-current', b.dataset.aba === ST.aba ? 'page' : 'false'));
-  $('#titulo').firstChild.textContent = ST.aba === 'novo' ? (R && R.id ? 'Editar lançamento' : 'Novo lançamento') : ST.aba === 'lista' ? 'Lançamentos' : ST.aba === 'pers' ? 'Personal' : ST.aba === 'rel' ? 'RDV Farid' : 'Conta';
+  $('#titulo').firstChild.textContent = ST.aba === 'novo' ? (R && R.id ? 'Editar lançamento' : 'Novo lançamento') : ST.aba === 'lista' ? 'Lançamentos' : ST.aba === 'pers' ? 'Personal' : ST.aba === 'rel' ? 'RDV' : 'Conta';
   $('#quem').textContent = ST.dados.usuario ? ST.dados.usuario.nome : '';
   if (ST.aba === 'novo') telaNovo(); else if (ST.aba === 'lista') telaLista(); else if (ST.aba === 'pers') telaPers(); else if (ST.aba === 'rel') telaRel(); else telaConta();
 }
@@ -715,6 +715,34 @@ function folhaPorPlano() {
 /* ---------- Relatórios Farid (despesas de viagem por unidade e verba diretor) ---------- */
 const MESC = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
 const temRelatorios = () => !!(ST.dados && ST.dados.relatorios);
+const temRdv = () => !!(ST.dados && ST.dados.rdv);
+/* ---------- RDV Aneethun ES / BH e UniTudo (modelo clássico; administradores) ---------- */
+const RV = { mes: '' };
+function htmlRdv() {
+  const R = ST.dados.rdv, hoje = hojeISO().slice(0, 7);
+  const meses = [...new Set(R.despesas.map(x => x.data.slice(0, 7)).concat([hoje]))].sort().reverse().slice(0, 18);
+  if (!meses.includes(RV.mes)) RV.mes = meses.find(m => R.despesas.some(x => x.data.slice(0, 7) === m)) || hoje;
+  return `<div class="cartao" id="rdvCard"${temRelatorios() ? ' style="margin-top:12px"' : ''}>
+    <div class="tit"><span class="ico"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5M10 13h6M10 17h6"/></svg></span><span><b>RDV Aneethun e UniTudo</b><small>Um PDF por empresa no mês</small></span></div>
+    <div class="meses" role="group" aria-label="Mês do RDV">${meses.map(m => `<button type="button" class="chip" data-rvmes="${m}" aria-pressed="${m === RV.mes}">${MES[+m.slice(5) - 1].replace(/^./, c => c.toUpperCase())} ${m.slice(0, 4)}</button>`).join('')}</div>
+    ${R.grupos.map(g => { const l = R.despesas.filter(x => x.grupo === g.chave && x.data.slice(0, 7) === RV.mes), t = l.reduce((a, x) => a + x.valor, 0);
+      return `<div class="unid" style="cursor:default"><span class="t"><b>${esc(g.titulo)}</b><small>${!g.achado ? `<span style="color:var(--warn)">Plano “${esc(g.plano)}” não existe no painel</span>` : l.length ? `${l.length} despesa${l.length === 1 ? '' : 's'} · ${brl(t)}` : 'Nenhuma despesa neste mês'}</small></span>
+        <button type="button" class="btn ${l.length ? 'pri' : 'sec'}" style="min-height:38px;padding:0 14px;font-size:13px;width:auto;flex:none" data-rv="${esc(g.chave)}" ${l.length && g.achado ? '' : 'disabled'}>Gerar PDF</button></div>`; }).join('')}
+  </div>`;
+}
+function ligarRdv() {
+  document.querySelectorAll('[data-rvmes]').forEach(b => b.onclick = () => { RV.mes = b.dataset.rvmes; tela(); });
+  document.querySelectorAll('[data-rv]').forEach(b => b.onclick = () => {
+    const R = ST.dados.rdv, g = R.grupos.find(x => x.chave === b.dataset.rv), l = R.despesas.filter(x => x.grupo === g.chave && x.data.slice(0, 7) === RV.mes);
+    const f = abrirFolha(`<div class="folha-cab"><h3>RDV ${esc(g.titulo)}<span class="mini">${MES[+RV.mes.slice(5) - 1]}/${RV.mes.slice(0, 4)}</span></h3></div><div class="folha-corpo det">
+      <span class="mini">${l.length} despesa${l.length === 1 ? '' : 's'} · total ${brl(l.reduce((a, x) => a + x.valor, 0))} · ${esc(g.empresa)}</span>
+      <div class="campo"><label class="rot" for="rvAd">Adiantamento recebido</label><input class="busca" id="rvAd" inputmode="numeric" value="${brl(0)}"></div>
+      <span class="mini" id="rvErro" role="alert" style="color:var(--neg);font-weight:700"></span>
+      <button type="button" class="btn pri" id="rvOk">Gerar PDF</button></div>`);
+    let ad = 0; dinheiro(f.querySelector('#rvAd'), c => { ad = c; });
+    f.querySelector('#rvOk').onclick = () => gerarPdf({ tipo: 'simples', grupo: g.chave, mes: RV.mes, adiantamento: ad }, f.querySelector('#rvOk'), f.querySelector('#rvErro'));
+  });
+}
 const RL = { mes: '', sel: null };
 const brl0 = c => 'R$ ' + String(Math.round(c / 100)).replace(/\B(?=(\d{3})+(?!\d))/g, '.');
 function unidadesDoMes(mes) {
@@ -722,7 +750,12 @@ function unidadesDoMes(mes) {
   ST.dados.relatorios.despesas.filter(x => x.data.slice(0, 7) === mes).forEach(x => { const k = x.unidadeId || ''; (g[k] = g[k] || { id: k, nome: x.unidade || 'Sem unidade', l: [] }).l.push(x); });
   return Object.values(g).sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
 }
+/** Aba RDV: Farid (quem tem relatórios) e Aneethun/UniTudo (administradores). */
 function telaRel() {
+  if (temRelatorios()) telaRelFarid(); else $('#corpo').innerHTML = '';
+  if (temRdv()) { const ref = $('#rDados'), h = htmlRdv(); if (ref) ref.insertAdjacentHTML('beforebegin', h); else $('#corpo').insertAdjacentHTML('afterbegin', h); ligarRdv(); }
+}
+function telaRelFarid() {
   const R0 = ST.dados.relatorios, hoje = hojeISO().slice(0, 7);
   const meses = [...new Set(R0.despesas.map(x => x.data.slice(0, 7)).concat([hoje]))].sort().reverse();
   if (!meses.includes(RL.mes)) RL.mes = meses.find(m => R0.despesas.some(x => x.data.slice(0, 7) === m)) || hoje;
