@@ -4,7 +4,7 @@
  * - Login Google: o painel confere o login e a lista de e-mails autorizados (nada disso fica aqui).
  */
 'use strict';
-const APP_VERSAO = '4';
+const APP_VERSAO = '5';
 const CFG = window.HM_CONFIG || {};
 
 /* ================================================================== */
@@ -255,10 +255,11 @@ function tela() {
   if (!ST.sessao || !ST.dados) { if (!ST.sessao) telaLogin(); return; }
   document.querySelectorAll('.login').forEach(x => x.remove());
   $('#abaPers').hidden = !temPersonal(); if (ST.aba === 'pers' && !temPersonal()) ST.aba = 'novo';
+  $('#abaRel').hidden = !temRelatorios(); if (ST.aba === 'rel' && !temRelatorios()) ST.aba = 'novo';
   document.querySelectorAll('[data-aba]').forEach(b => b.setAttribute('aria-current', b.dataset.aba === ST.aba ? 'page' : 'false'));
-  $('#titulo').firstChild.textContent = ST.aba === 'novo' ? (R && R.id ? 'Editar lançamento' : 'Novo lançamento') : ST.aba === 'lista' ? 'Lançamentos' : ST.aba === 'pers' ? 'Personal' : 'Conta';
+  $('#titulo').firstChild.textContent = ST.aba === 'novo' ? (R && R.id ? 'Editar lançamento' : 'Novo lançamento') : ST.aba === 'lista' ? 'Lançamentos' : ST.aba === 'pers' ? 'Personal' : ST.aba === 'rel' ? 'Relatórios' : 'Conta';
   $('#quem').textContent = ST.dados.usuario ? ST.dados.usuario.nome : '';
-  if (ST.aba === 'novo') telaNovo(); else if (ST.aba === 'lista') telaLista(); else if (ST.aba === 'pers') telaPers(); else telaConta();
+  if (ST.aba === 'novo') telaNovo(); else if (ST.aba === 'lista') telaLista(); else if (ST.aba === 'pers') telaPers(); else if (ST.aba === 'rel') telaRel(); else telaConta();
 }
 const faixaTeste = () => ST.dados.modoTeste ? '<div class="faixa" role="note"><span><b>Modo teste.</b> O que for lançado aqui fica no app e no painel, mas ainda não entra na conciliação nem na DRE.</span></div>' : '';
 
@@ -282,8 +283,8 @@ function telaNovo() {
         ${R.dividir && R.partes.length > 1 ? `<button type="button" class="ic" data-tirar="${i}" aria-label="Tirar a parte ${i + 1}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg></button>` : ''}</div>
       ${R.dividir ? `<div class="parte-valor"><input inputmode="numeric" data-pval="${i}" value="${brl(p.valor || 0)}" aria-label="Valor da parte ${i + 1}"></div>` : ''}
       ${ex.viagem ? `<div class="reemb"><span class="tag">Reembolsável</span>
-        <div class="campo"><span class="rot">Tipo de despesa de viagem</span><div class="chips">${chipsDe('tipo_viagem', i, 'viagemId', p.viagemId)}</div></div>
-        ${ex.farid ? `<div class="campo"><span class="rot">Unidade Farid</span><div class="chips">${chipsDe('unidade_farid', i, 'unidadeId', p.unidadeId)}</div></div>
+        <div class="campo"><span class="rot">Tipo de despesa de viagem *</span><div class="chips">${chipsDe('tipo_viagem', i, 'viagemId', p.viagemId)}</div></div>
+        ${ex.farid ? `<div class="campo"><span class="rot">Unidade Farid *</span><div class="chips">${chipsDe('unidade_farid', i, 'unidadeId', p.unidadeId)}</div></div>
         <div class="campo"><span class="rot">Verba diretor</span><div class="chips">${['Não', 'Sim'].map(v => `<button type="button" class="chip" data-x="${i}|verba|${v}" aria-pressed="${(p.verba ? 'Sim' : 'Não') === v}">${v}</button>`).join('')}</div>
           ${p.verba ? `<div class="campo verba"><label class="rot" for="verba${i}">Valor da verba diretor</label><input inputmode="numeric" class="busca" id="verba${i}" data-verba="${i}" value="${brl(p.valorVerba || 0)}" aria-describedby="verbaMsg${i}"><span class="verba-msg" id="verbaMsg${i}"></span></div>` : ''}</div>` : ''}</div>` : ''}
       ${ex.fazenda ? `<div class="reemb"><div class="campo"><span class="rot">Tipo de despesa da fazenda</span><div class="chips">${chipsDe('tipo_fazenda', i, 'fazendaId', p.fazendaId)}</div></div></div>` : ''}
@@ -417,6 +418,10 @@ async function salvar() {
   if (R.dividir && R.partes.some(p => !p.valor)) return erro('Informe o valor de cada parte.');
   if (R.dividir && somaPartes() !== R.valor) return erro('A soma das partes precisa fechar o total de ' + brl(R.valor) + '.');
   const vb = R.partes.findIndex((p, i) => extrasDe(p.planoId).farid && p.verba && (!p.valorVerba || p.valorVerba > valorDaParte(i)));
+  const semTipo = R.partes.findIndex(p => extrasDe(p.planoId).viagem && !p.viagemId);
+  if (semTipo >= 0) return erro(R.dividir ? `Escolha o tipo de despesa de viagem em ${planoNome(R.partes[semTipo].planoId)}.` : 'Escolha o tipo de despesa de viagem.');
+  const semUni = R.partes.findIndex(p => extrasDe(p.planoId).farid && !p.unidadeId);
+  if (semUni >= 0) return erro('Escolha a Unidade Farid.');
   if (vb >= 0) { const p = R.partes[vb]; return erro(!p.valorVerba ? 'Informe o valor da verba diretor.' : `A verba diretor (${brl(p.valorVerba)}) não pode passar do valor em ${planoNome(p.planoId)} (${brl(valorDaParte(vb))}).`); }
   if (!R.formaId) return erro('Escolha a forma de pagamento.');
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(R.data)) return erro('Informe a data e a hora.');
@@ -610,6 +615,108 @@ function animSalvoPers(tipo, qtd, local, off) {
     <g class="okc"><circle cx="96" cy="24" r="13" fill="${off ? '#A86200' : '#1E7F4F'}"/>${off ? '<path d="M96 17v8M96 29v1" stroke="#fff" stroke-width="3" stroke-linecap="round"/>' : '<path d="M90 24l4 4 8-8" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>'}</g></svg>
     <b>${tipo === 'compra' ? `${qtd} aula${qtd === 1 ? '' : 's'} comprada${qtd === 1 ? '' : 's'}` : 'Aula registrada'}</b><span>${esc(local)}${off ? ' · guardado no celular, sobe quando a internet voltar' : ' · enviando para o painel'}</span></div>`;
   $('#app').appendChild(el); setTimeout(() => el.remove(), reduz() ? 900 : 1600);
+}
+
+/* ---------- Relatórios Farid (despesas de viagem por unidade e verba diretor) ---------- */
+const MESC = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
+const temRelatorios = () => !!(ST.dados && ST.dados.relatorios);
+const RL = { mes: '', sel: null };
+const brl0 = c => 'R$ ' + String(Math.round(c / 100)).replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+function unidadesDoMes(mes) {
+  const g = {};
+  ST.dados.relatorios.despesas.filter(x => x.data.slice(0, 7) === mes).forEach(x => { const k = x.unidadeId || ''; (g[k] = g[k] || { id: k, nome: x.unidade || 'Sem unidade', l: [] }).l.push(x); });
+  return Object.values(g).sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+}
+function telaRel() {
+  const R0 = ST.dados.relatorios, hoje = hojeISO().slice(0, 7);
+  const meses = [...new Set(R0.despesas.map(x => x.data.slice(0, 7)).concat([hoje]))].sort().reverse();
+  if (!meses.includes(RL.mes)) RL.mes = meses.find(m => R0.despesas.some(x => x.data.slice(0, 7) === m)) || hoje;
+  const us = unidadesDoMes(RL.mes); if (!us.some(u => u.id === RL.sel)) RL.sel = us.length ? us[0].id : null;
+  const ano = RL.mes.slice(0, 4), daVerba = R0.despesas.filter(x => x.verba > 0 && x.data.slice(0, 4) === ano);
+  const deb = daVerba.reduce((a, x) => a + x.verba, 0), cred = R0.cfg.credito * 12, noMes = daVerba.filter(x => x.data.slice(0, 7) === RL.mes);
+  const naFila = ST.fila.filter(o => o.tipo === 'salvar').length, sel = us.find(u => u.id === RL.sel);
+  $('#corpo').innerHTML = `
+  ${naFila ? `<div class="faixa" role="note"><span><b>${naFila} lançamento${naFila === 1 ? '' : 's'} ainda no celular.</b> Só entram no relatório depois de enviados.</span></div>` : ''}
+  <div class="cartao">
+    <div class="tit"><span class="ico"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 17l4-8 4 5 3-3 7 6"/><path d="M3 21h18"/></svg></span><span><b>Despesas de viagem</b><small>Um PDF por unidade Farid</small></span></div>
+    <div class="meses" role="group" aria-label="Mês">${meses.map(m => `<button type="button" class="chip" data-rmes="${m}" aria-pressed="${m === RL.mes}">${MES[+m.slice(5) - 1].replace(/^./, c => c.toUpperCase())} ${m.slice(0, 4)}</button>`).join('')}</div>
+    ${us.length ? us.map(u => { const sem = u.l.filter(x => !x.tipo).length; return `<button type="button" class="unid" data-runid="${esc(u.id)}" aria-pressed="${u.id === RL.sel}"><span class="t"><b>${esc(u.nome)}</b><small>${u.l.length} despesa${u.l.length === 1 ? '' : 's'}${sem ? ` · <span style="color:var(--warn)">${sem} sem tipo (vai em “Outro”)</span>` : ''}${!u.id ? ' · <span style="color:var(--warn)">corrija a unidade</span>' : ''}</small></span><span class="v">${brl(u.l.reduce((a, x) => a + x.valor, 0))}</span></button>`; }).join('')
+      : '<div class="mini" style="text-align:center;padding:14px">Nenhuma despesa Farid neste mês.</div>'}
+    ${us.length ? `<button type="button" class="btn pri" id="rGerar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>Gerar PDF · ${esc(sel.nome)}</button>
+      ${us.length > 1 ? `<button type="button" class="btn sec" id="rTodos">Gerar todos (${us.length} PDFs)</button>` : ''}` : ''}
+  </div>
+  <div class="cartao">
+    <div class="tit"><span class="ico"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18M7 15h4"/></svg></span><span><b>Verba diretor ${ano}</b><small>Investimentos c/ Time · acumulado do ano</small></span></div>
+    <div class="saldo3"><div><small>Crédito</small><b>${brl0(cred)}</b></div><div><small>Débito</small><b>${brl0(deb)}</b></div><div class="${cred - deb >= 0 ? 'ok' : 'neg'}"><small>Saldo</small><b>${brl0(cred - deb)}</b></div></div>
+    <span class="mini">${MESC[+RL.mes.slice(5) - 1]}/${ano}: ${noMes.length} despesa${noMes.length === 1 ? '' : 's'} com verba · ${brl(noMes.reduce((a, x) => a + x.verba, 0))}</span>
+    <button type="button" class="btn pri" id="rVerba"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>Gerar PDF da verba ${ano}</button>
+  </div>
+  <button type="button" class="btn sec" id="rDados" style="width:100%;margin-top:12px">Dados do relatório</button>
+  <p class="mini" style="text-align:center">Gerar precisa de internet. O PDF fica guardado no Drive (8.1.5 - Relatórios Farid).</p>`;
+  document.querySelectorAll('[data-rmes]').forEach(b => b.onclick = () => { RL.mes = b.dataset.rmes; RL.sel = null; tela(); });
+  document.querySelectorAll('[data-runid]').forEach(b => b.onclick = () => { RL.sel = b.dataset.runid; tela(); });
+  const g = $('#rGerar'); if (g) g.onclick = () => folhaGerar(sel);
+  const t = $('#rTodos'); if (t) t.onclick = () => gerarTodos(us);
+  $('#rVerba').onclick = () => gerarPdf({ tipo: 'verba', ano }, $('#rVerba'));
+  $('#rDados').onclick = folhaDadosRel;
+}
+function folhaGerar(u) {
+  const f = abrirFolha(`<div class="folha-cab"><h3>Gerar PDF<span class="mini">${esc(u.nome)} · ${MES[+RL.mes.slice(5) - 1]}/${RL.mes.slice(0, 4)}</span></h3></div><div class="folha-corpo det">
+    <span class="mini">${u.l.length} despesa${u.l.length === 1 ? '' : 's'} · total ${brl(u.l.reduce((a, x) => a + x.valor, 0))}</span>
+    <div class="campo"><label class="rot" for="rAd">Adiantamento recebido</label><input class="busca" id="rAd" inputmode="numeric" value="${brl(0)}"></div>
+    <span class="mini" id="rErro" role="alert" style="color:var(--neg);font-weight:700"></span>
+    <button type="button" class="btn pri" id="rOk">Gerar PDF</button></div>`);
+  let ad = 0; dinheiro(f.querySelector('#rAd'), c => { ad = c; });
+  f.querySelector('#rOk').onclick = () => gerarPdf({ tipo: 'viagem', mes: RL.mes, unidadeId: u.id, adiantamento: ad }, f.querySelector('#rOk'), f.querySelector('#rErro'));
+}
+async function gerarTodos(us) {
+  const b = $('#rTodos'); if (!ST.online) return aviso('Sem internet: gerar o PDF precisa de conexão.', true);
+  const prontos = [];
+  for (let i = 0; i < us.length; i++) {
+    b.disabled = true; b.textContent = `Gerando ${i + 1} de ${us.length}…`;
+    try { prontos.push(await api('relatorio', { tipo: 'viagem', mes: RL.mes, unidadeId: us[i].id, adiantamento: 0 })); }
+    catch (e) { b.disabled = false; b.textContent = `Gerar todos (${us.length} PDFs)`; return aviso(e.login ? 'Entre de novo para gerar.' : e.message, true); }
+  }
+  b.disabled = false; b.textContent = `Gerar todos (${us.length} PDFs)`;
+  folhaPdfs(prontos);
+}
+async function gerarPdf(dados, botao, erroEl) {
+  if (!ST.online) { const m = 'Sem internet: gerar o PDF precisa de conexão.'; return erroEl ? erroEl.textContent = m : aviso(m, true); }
+  if (!tokenValido()) { fecharFolha(true); return folhaLogin(); }
+  const txt = botao.textContent; botao.disabled = true; botao.textContent = 'Gerando o PDF…';
+  try { const r = await api('relatorio', dados); folhaFim = null; fecharFolha(true); folhaPdfs([r]); }
+  catch (e) { if (erroEl) erroEl.textContent = e.message; else aviso(e.message, true); }
+  finally { botao.disabled = false; botao.textContent = txt; }
+}
+const pdfArquivo = r => { const bin = atob(r.pdf), u8 = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i); return new File([u8], r.nome, { type: 'application/pdf' }); };
+/** PDF pronto: compartilhar (WhatsApp, e-mail…) ou abrir/baixar. */
+function folhaPdfs(lista) {
+  const arqs = lista.map(pdfArquivo), urls = arqs.map(a => URL.createObjectURL(a));
+  const podeComp = !!(navigator.canShare && navigator.canShare({ files: arqs }));
+  const f = abrirFolha(`<div class="folha-cab"><h3>${lista.length === 1 ? 'PDF pronto' : lista.length + ' PDFs prontos'}</h3></div><div class="folha-corpo det">
+    <span class="tag" style="background:var(--ok-bg);color:var(--ok)">Cópia guardada no Drive</span>
+    ${lista.map((r, i) => `<div class="unid" style="cursor:default"><span class="t"><b style="font-size:13.5px">${esc(r.nome)}</b></span><a class="btn sec" style="min-height:36px;padding:0 12px" href="${urls[i]}" download="${esc(r.nome)}" target="_blank" rel="noopener">Abrir</a></div>`).join('')}
+    ${podeComp ? `<button type="button" class="btn pri" id="rComp"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4"/></svg>Compartilhar</button>` : ''}
+  </div>`);
+  const c = f.querySelector('#rComp'); if (c) c.onclick = () => navigator.share({ files: arqs, title: lista.length === 1 ? lista[0].nome : 'Relatórios Farid' }).catch(() => { });
+}
+function folhaDadosRel() {
+  const c = ST.dados.relatorios.cfg, campo = (k, r) => `<div class="campo"><label class="rot" for="rc_${k}">${r}</label><input class="busca" id="rc_${k}" value="${esc(c[k])}" maxlength="120"></div>`;
+  const f = abrirFolha(`<div class="folha-cab"><h3>Dados do relatório</h3></div><div class="folha-corpo det">
+    <span class="mini">Valem para todos que geram os relatórios. Ficam guardados no painel.</span>
+    ${campo('nome', 'Nome')}${campo('cargo', 'Cargo')}${campo('depto', 'Departamento')}${campo('origem', 'Origem/Destino')}${campo('motivo', 'Motivo')}${campo('cidade', 'Cidade (assinatura)')}
+    <div class="campo"><label class="rot" for="rc_credito">Crédito mensal da verba</label><input class="busca" id="rc_credito" inputmode="numeric" value="${brl(c.credito)}"></div>
+    <span class="mini" id="rcErro" role="alert" style="color:var(--neg);font-weight:700"></span>
+    <button type="button" class="btn pri" id="rcOk">Salvar</button></div>`);
+  let cred = c.credito; dinheiro(f.querySelector('#rc_credito'), v => { cred = v; });
+  f.querySelector('#rcOk').onclick = async () => {
+    const b = f.querySelector('#rcOk'), d = { credito: cred }; ['nome', 'cargo', 'depto', 'origem', 'motivo', 'cidade'].forEach(k => { d[k] = f.querySelector('#rc_' + k).value.trim(); });
+    if (Object.values(d).some(v => v === '')) return f.querySelector('#rcErro').textContent = 'Preencha todos os campos.';
+    if (!ST.online || !tokenValido()) return f.querySelector('#rcErro').textContent = !ST.online ? 'Sem internet: salvar precisa de conexão.' : 'Entre de novo para salvar.';
+    b.disabled = true; b.textContent = 'Salvando…';
+    try { const r = await api('relatorio_cfg', d); ST.dados.relatorios.cfg = r.cfg; await guardar('dados'); fecharFolha(); aviso('Dados do relatório salvos'); tela(); }
+    catch (e) { f.querySelector('#rcErro').textContent = e.message; b.disabled = false; b.textContent = 'Salvar'; }
+  };
 }
 
 /* ---------- conta ---------- */

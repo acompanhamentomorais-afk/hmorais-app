@@ -185,3 +185,19 @@ input,select,textarea{font:inherit;color:inherit}
 .carregando i{width:26px;height:26px;border-radius:50%;border:3px solid var(--line);border-top-color:var(--gold);animation:gira .8s linear infinite}
 @keyframes gira{to{transform:rotate(360deg)}}
 @media (min-width:560px){ .app{border-left:1px solid var(--line);border-right:1px solid var(--line)} }
+.tit{display:flex;align-items:center;gap:10px}
+.tit .ico{width:36px;height:36px;border-radius:11px;display:grid;place-items:center;background:var(--gold-soft);color:#8A5506;flex:none}
+.tit b{font-family:var(--f-display);font-size:15px;color:var(--navy);display:block}
+.tit small{color:var(--muted);font-size:12.5px}
+.unid{all:unset;box-sizing:border-box;cursor:pointer;display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--line);border-radius:14px;background:var(--surface)}
+.unid[aria-pressed="true"]{border-color:var(--gold);box-shadow:0 0 0 3px rgba(201,150,46,.15)}
+.unid:focus-visible{outline:2px solid var(--focus)}
+.unid .t{flex:1;min-width:0}.unid .t b{display:block;font-size:14.5px;overflow-wrap:anywhere}.unid .t small{color:var(--muted);font-size:12px}
+.unid .v{font-weight:800;font-size:14px;text-align:right;white-space:nowrap}
+.saldo3{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+.saldo3 div{background:var(--soft);border-radius:12px;padding:8px}
+.saldo3 small{display:block;font-size:11px;color:var(--muted);font-weight:700}
+.saldo3 b{font-size:14.5px}
+.saldo3 div.ok{background:var(--ok-bg)}.saldo3 div.ok b{color:var(--ok)}
+.saldo3 div.neg{background:var(--neg-bg)}.saldo3 div.neg b{color:var(--neg)}
+.abas button{min-width:0;font-size:11px}
