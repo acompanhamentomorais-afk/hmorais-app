@@ -4,7 +4,7 @@
  * - Login Google: o painel confere o login e a lista de e-mails autorizados (nada disso fica aqui).
  */
 'use strict';
-const APP_VERSAO = '8';
+const APP_VERSAO = '9';
 const CFG = window.HM_CONFIG || {};
 
 /* ================================================================== */
@@ -297,7 +297,7 @@ function tela() {
   if (ap) ap.hidden = !temPersonal(); if (ST.aba === 'pers' && !(ap && temPersonal())) ST.aba = 'novo';
   if (ar) ar.hidden = !temRelatorios(); if (ST.aba === 'rel' && !(ar && temRelatorios())) ST.aba = 'novo';
   document.querySelectorAll('[data-aba]').forEach(b => b.setAttribute('aria-current', b.dataset.aba === ST.aba ? 'page' : 'false'));
-  $('#titulo').firstChild.textContent = ST.aba === 'novo' ? (R && R.id ? 'Editar lançamento' : 'Novo lançamento') : ST.aba === 'lista' ? 'Lançamentos' : ST.aba === 'pers' ? 'Personal' : ST.aba === 'rel' ? 'Relatórios' : 'Conta';
+  $('#titulo').firstChild.textContent = ST.aba === 'novo' ? (R && R.id ? 'Editar lançamento' : 'Novo lançamento') : ST.aba === 'lista' ? 'Lançamentos' : ST.aba === 'pers' ? 'Personal' : ST.aba === 'rel' ? 'RDV Farid' : 'Conta';
   $('#quem').textContent = ST.dados.usuario ? ST.dados.usuario.nome : '';
   if (ST.aba === 'novo') telaNovo(); else if (ST.aba === 'lista') telaLista(); else if (ST.aba === 'pers') telaPers(); else if (ST.aba === 'rel') telaRel(); else telaConta();
 }
@@ -523,7 +523,7 @@ function telaLista() {
       <button type="button" class="chip" id="fForma" aria-pressed="${!!F.forma}">${esc(fNome ? fNome.replace('Cartão de Crédito ', '').replace(/[()]/g, '') : 'Pagamento')} ▾</button>
     </div>
   </div>
-  <div class="resumo"><div><small>${ls.length} lançamento${ls.length === 1 ? '' : 's'}${F.plano ? ' · só a parte de ' + esc(planoNome(F.plano)) : ''}</small><b>${brl(tot)}</b></div><small>${ST.online ? (veTodos() ? 'Lançamentos do app' : 'Seus lançamentos') : 'Cópia salva no celular'}</small></div>
+  <div class="resumo"><div><small>${ls.length} lançamento${ls.length === 1 ? '' : 's'}${F.plano ? ' · só a parte de ' + esc(planoNome(F.plano)) : ''}</small><b>${brl(tot)}</b></div>${ls.length ? `<button type="button" class="pp-btn" id="porPlano" aria-haspopup="dialog"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Por plano</button>` : `<small>${ST.online ? (veTodos() ? 'Lançamentos do app' : 'Seus lançamentos') : 'Cópia salva no celular'}</small>`}</div>
   ${Object.keys(porDia).length ? Object.entries(porDia).map(([d, l]) => `<div class="dia"><span>${nomeDia(d)}</span><span>${brl(l.reduce((a, x) => a + valorFiltrado(x), 0))}</span></div>${l.map(x => `
     <button type="button" class="item" data-ver="${esc(x.id)}"><span class="av ${x.dono === eu() ? '' : 'g'}" title="${esc(x.usuario)}">${esc((x.usuario || '?')[0])}</span>
       <span class="txt"><b>${esc(x.desc)}</b><small>${esc(x.partes.map(p => planoNome(p.planoId) || p.plano).join(' + '))}${x.partes.length > 1 ? ' · dividida' : ''}</small><small>${esc(formaNome(x.formaId))}${x.parcelas > 1 ? ' · ' + x.parcelas + '×' : ''}</small></span>
@@ -535,6 +535,7 @@ function telaLista() {
   $('#fPlano').onclick = async () => { const v = await escolher('Filtrar por plano', itensPlanos(F.plano), F.plano, { limpar: 'Todos os planos' }); if (v == null) return; F.plano = v; tela(); };
   $('#fForma').onclick = async () => { const v = await escolher('Filtrar por pagamento', itensLista('forma', F.forma), F.forma, { limpar: 'Todas as formas' }); if (v == null) return; F.forma = v; tela(); };
   document.querySelectorAll('[data-ver]').forEach(b => b.onclick = () => detalhe(vista().lanc.find(l => l.id === b.dataset.ver)));
+  const pp = $('#porPlano'); if (pp) pp.onclick = folhaPorPlano;
 }
 const fotos = {};   // fotos já baixadas nesta abertura
 function detalhe(l) {
@@ -670,6 +671,45 @@ function animSalvoPers(tipo, qtd, local, off) {
     <g class="okc"><circle cx="96" cy="24" r="13" fill="${off ? '#A86200' : '#1E7F4F'}"/>${off ? '<path d="M96 17v8M96 29v1" stroke="#fff" stroke-width="3" stroke-linecap="round"/>' : '<path d="M90 24l4 4 8-8" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>'}</g></svg>
     <b>${tipo === 'compra' ? `${qtd} aula${qtd === 1 ? '' : 's'} comprada${qtd === 1 ? '' : 's'}` : 'Aula registrada'}</b><span>${esc(local)}${off ? ' · guardado no celular, sobe quando a internet voltar' : ' · enviando para o painel'}</span></div>`;
   $('#app').appendChild(el); setTimeout(() => el.remove(), reduz() ? 900 : 1600);
+}
+
+/* ---------- Gastos por plano (gráfico de ranking do mês, aba Lançamentos) ---------- */
+const PP = { modo: 'brl', todos: false };
+/** Soma por plano dos lançamentos que estão na tela (mês, Todos/Meus, busca e forma; o filtro de plano é ignorado). Compra dividida: cada parte no seu plano. */
+function gastosPorPlano() {
+  const F = ST.filtro, guarda = F.plano; F.plano = '';
+  const ls = filtrados(vista().lanc); F.plano = guarda;
+  const g = {};
+  ls.forEach(l => l.partes.forEach(p => { const k = p.planoId || p.plano; const x = g[k] = g[k] || { id: p.planoId, nome: planoNome(p.planoId) || p.plano || 'Sem plano', valor: 0, ids: new Set() }; x.valor += p.valor || 0; x.ids.add(l.id); }));
+  const lista = Object.values(g).map(x => ({ id: x.id, nome: x.nome, valor: x.valor, n: x.ids.size })).sort((a, b) => b.valor - a.valor || a.nome.localeCompare(b.nome, 'pt-BR'));
+  return { lista, total: lista.reduce((a, x) => a + x.valor, 0), nLanc: ls.length };
+}
+const pctTxt = (v, t) => (t ? v / t * 100 : 0).toFixed(1).replace('.', ',') + '%';
+const brlInt = c => 'R$ ' + Math.round(c / 100).toLocaleString('pt-BR');
+function folhaPorPlano() {
+  const D = gastosPorPlano(), F = ST.filtro, mesTxt = MES[+F.mes.slice(5) - 1].replace(/^./, c => c.toUpperCase()) + ' ' + F.mes.slice(0, 4);
+  const filtrosTxt = [veTodos() ? (F.quem === 'todos' ? 'Todos' : 'Meus') : 'Seus lançamentos', F.forma ? formaNome(F.forma) : '', F.q.trim() ? '“' + F.q.trim() + '”' : ''].filter(Boolean).join(' · ');
+  const f = abrirFolha(`<div class="folha-cab pp-cab"><h3>Gastos por plano<small>${esc(mesTxt)} · ${esc(filtrosTxt)}</small></h3>
+      <div class="seg pp-seg" role="group" aria-label="Mostrar valores em"><button type="button" data-ppm="brl" aria-pressed="${PP.modo === 'brl'}">R$</button><button type="button" data-ppm="pct" aria-pressed="${PP.modo === 'pct'}">%</button></div></div>
+    <div class="folha-corpo pp-corpo" id="ppCorpo"></div>`);
+  const pinta = () => {
+    const max = D.lista.length ? D.lista[0].valor : 1, vis = PP.todos ? D.lista : D.lista.slice(0, 8);
+    f.querySelector('#ppCorpo').innerHTML = `<div class="pp-hero"><b>${brl(D.total)}</b><span>${D.lista.length} plano${D.lista.length === 1 ? '' : 's'}<br>${D.nLanc} lançamento${D.nLanc === 1 ? '' : 's'}</span></div>
+      ${vis.map((x, i) => `<button type="button" class="pp-linha${i < 3 ? ' top' : ''}" aria-expanded="false" data-ppi="${i}">
+        <span class="pp-l1"><b>${esc(x.nome)}</b><span>${PP.modo === 'pct' ? pctTxt(x.valor, D.total) : brl(x.valor)}<em>${PP.modo === 'pct' ? brlInt(x.valor) : pctTxt(x.valor, D.total)}</em></span></span>
+        <span class="pp-trilho" aria-hidden="true"><i style="width:${Math.max(1.5, x.valor / max * 100)}%;animation-delay:${reduz() ? 0 : i * 40}ms"></i></span>
+        <span class="pp-det"><span>${x.n} lançamento${x.n === 1 ? '' : 's'} · média ${brl(Math.round(x.valor / x.n))}</span>${x.id ? `<span class="pp-ver" data-ppver="${esc(x.id)}">Ver lançamentos ›</span>` : ''}</span></button>`).join('')}
+      ${!PP.todos && D.lista.length > 8 ? `<button type="button" class="pp-mais" id="ppMais">Ver mais ${D.lista.length - 8} plano${D.lista.length - 8 === 1 ? '' : 's'}</button>` : ''}
+      <p class="mini" style="text-align:center;margin:12px 0 0">Compra dividida entra em cada plano só com a sua parte.</p>`;
+    f.querySelectorAll('.pp-linha').forEach(b => b.onclick = e => {
+      const ver = e.target.closest('[data-ppver]');
+      if (ver) { ST.filtro.plano = ver.dataset.ppver; folhaFim = null; fecharFolha(); tela(); $('#corpo').scrollTop = 0; return; }
+      const ab = b.getAttribute('aria-expanded') === 'true'; f.querySelectorAll('.pp-linha').forEach(x => x.setAttribute('aria-expanded', 'false')); b.setAttribute('aria-expanded', String(!ab));
+    });
+    const m = f.querySelector('#ppMais'); if (m) m.onclick = () => { PP.todos = true; pinta(); };
+  };
+  f.querySelectorAll('[data-ppm]').forEach(b => b.onclick = () => { PP.modo = b.dataset.ppm; f.querySelectorAll('[data-ppm]').forEach(x => x.setAttribute('aria-pressed', String(x === b))); pinta(); });
+  PP.todos = false; pinta();
 }
 
 /* ---------- Relatórios Farid (despesas de viagem por unidade e verba diretor) ---------- */
