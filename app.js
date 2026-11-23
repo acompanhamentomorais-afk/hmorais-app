@@ -4,7 +4,7 @@
  * - Login Google: o painel confere o login e a lista de e-mails autorizados (nada disso fica aqui).
  */
 'use strict';
-const APP_VERSAO = '2';
+const APP_VERSAO = '3';
 const CFG = window.HM_CONFIG || {};
 
 /* ================================================================== */
@@ -56,6 +56,7 @@ const nomeOpcao = (k, id) => (opcao(k, id) || {}).valor || '';
 const naLista = (k, planoId) => !!planoId && lista(k).some(x => x.ativo && x.planoId === planoId);
 const extrasDe = planoId => ({ viagem: naLista('plano_reembolsavel', planoId) || naLista('plano_farid', planoId), farid: naLista('plano_farid', planoId), fazenda: naLista('plano_fazenda', planoId) });
 const formaNome = id => nomeOpcao('forma', id);
+const veTodos = () => !(ST.dados && ST.dados.usuario && ST.dados.usuario.todos === false);
 const temPersonal = () => !!(ST.dados && ST.dados.usuario && ST.dados.usuario.personal && ST.dados.personal);
 
 /** O que aparece na tela: o que veio do painel + o que ainda está na fila (e os recusados, para corrigir). */
@@ -447,7 +448,7 @@ function animSalvo(off, ed) {
 const mesesDe = ls => [...new Set(ls.map(l => l.data.slice(0, 7)).concat([hojeISO().slice(0, 7)]))].sort().reverse();
 function filtrados(ls) {
   const F = ST.filtro, q = F.q.trim().toLowerCase();
-  return ls.filter(l => l.data.slice(0, 7) === F.mes && (F.quem === 'todos' || l.dono === eu()) && (!F.plano || l.partes.some(p => p.planoId === F.plano)) && (!F.forma || l.formaId === F.forma)
+  return ls.filter(l => l.data.slice(0, 7) === F.mes && ((veTodos() && F.quem === 'todos') || l.dono === eu()) && (!F.plano || l.partes.some(p => p.planoId === F.plano)) && (!F.forma || l.formaId === F.forma)
     && (!q || [l.desc, nomeOpcao('estabelecimento', l.estabId), l.partes.map(p => planoNome(p.planoId) || p.plano).join(' '), l.obs, formaNome(l.formaId)].join(' ').toLowerCase().includes(q)))
     .sort((a, b) => b.data.localeCompare(a.data));
 }
@@ -466,12 +467,12 @@ function telaLista() {
     <div class="meses" role="group" aria-label="Mês">${meses.map(m => `<button type="button" class="chip" data-mes="${m}" aria-pressed="${m === F.mes}">${MES[+m.slice(5) - 1].replace(/^./, c => c.toUpperCase())} ${m.slice(0, 4)}</button>`).join('')}</div>
     <input type="search" class="busca" id="q" placeholder="Buscar descrição, plano ou estabelecimento" value="${esc(F.q)}" aria-label="Buscar">
     <div class="chips">
-      <div class="seg" style="flex:1"><button type="button" data-quem="todos" aria-pressed="${F.quem === 'todos'}">Todos</button><button type="button" data-quem="meus" aria-pressed="${F.quem === 'meus'}">Meus</button></div>
+      ${veTodos() ? `<div class="seg" style="flex:1"><button type="button" data-quem="todos" aria-pressed="${F.quem === 'todos'}">Todos</button><button type="button" data-quem="meus" aria-pressed="${F.quem === 'meus'}">Meus</button></div>` : ''}
       <button type="button" class="chip" id="fPlano" aria-pressed="${!!F.plano}">${esc(planoNome(F.plano) || 'Plano')} ▾</button>
       <button type="button" class="chip" id="fForma" aria-pressed="${!!F.forma}">${esc(fNome ? fNome.replace('Cartão de Crédito ', '').replace(/[()]/g, '') : 'Pagamento')} ▾</button>
     </div>
   </div>
-  <div class="resumo"><div><small>${ls.length} lançamento${ls.length === 1 ? '' : 's'}${F.plano ? ' · só a parte de ' + esc(planoNome(F.plano)) : ''}</small><b>${brl(tot)}</b></div><small>${ST.online ? 'Lançamentos do app' : 'Cópia salva no celular'}</small></div>
+  <div class="resumo"><div><small>${ls.length} lançamento${ls.length === 1 ? '' : 's'}${F.plano ? ' · só a parte de ' + esc(planoNome(F.plano)) : ''}</small><b>${brl(tot)}</b></div><small>${ST.online ? (veTodos() ? 'Lançamentos do app' : 'Seus lançamentos') : 'Cópia salva no celular'}</small></div>
   ${Object.keys(porDia).length ? Object.entries(porDia).map(([d, l]) => `<div class="dia"><span>${nomeDia(d)}</span><span>${brl(l.reduce((a, x) => a + valorFiltrado(x), 0))}</span></div>${l.map(x => `
     <button type="button" class="item" data-ver="${esc(x.id)}"><span class="av ${x.dono === eu() ? '' : 'g'}" title="${esc(x.usuario)}">${esc((x.usuario || '?')[0])}</span>
       <span class="txt"><b>${esc(x.desc)}</b><small>${esc(x.partes.map(p => planoNome(p.planoId) || p.plano).join(' + '))}${x.partes.length > 1 ? ' · dividida' : ''}</small><small>${esc(formaNome(x.formaId))}${x.parcelas > 1 ? ' · ' + x.parcelas + '×' : ''}</small></span>
