@@ -4,7 +4,7 @@
  * - Login Google: o painel confere o login e a lista de e-mails autorizados (nada disso fica aqui).
  */
 'use strict';
-const APP_VERSAO = '1';
+const APP_VERSAO = '2';
 const CFG = window.HM_CONFIG || {};
 
 /* ================================================================== */
@@ -113,8 +113,16 @@ async function atualizar(silencioso) {
     await guardar('dados', 'sessao');
   } catch (e) {
     if (e.login) { if (/não tem acesso/.test(e.message)) return sairDeVez(e.message); pedirLogin(); }
+    else if (!ST.dados) erroInicio(e.message);
     else if (!silencioso && !e.rede) aviso(e.message, true);
   } finally { atualizando = false; tela(); }
+}
+
+/** Primeira abertura sem conseguir falar com o painel: mostra o motivo e "Tentar de novo" (em vez de ficar carregando). */
+function erroInicio(msg) {
+  $('#corpo').innerHTML = `<div class="cartao" style="text-align:center;gap:12px"><b style="color:var(--navy);font-size:16px">Não consegui abrir os dados do painel</b>
+    <span class="mini" role="alert">${esc(msg)}</span><button type="button" class="btn pri" id="tentar">Tentar de novo</button></div>`;
+  $('#tentar').onclick = () => { $('#corpo').innerHTML = '<div class="carregando"><i></i></div>'; atualizar(); };
 }
 
 /** Envia a fila, um por vez, na ordem em que foi lançada. */
