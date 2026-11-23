@@ -4,7 +4,7 @@
  * - Login Google: o painel confere o login e a lista de e-mails autorizados (nada disso fica aqui).
  */
 'use strict';
-const APP_VERSAO = '6';
+const APP_VERSAO = '7';
 const CFG = window.HM_CONFIG || {};
 
 /* ================================================================== */
@@ -99,7 +99,14 @@ async function api(acao, dados) {
   } catch (e) { throw erroDe('Sem conexão com o painel.', { rede: true }); }
   finally { clearTimeout(t); }
   let j; try { j = await r.json(); } catch (e) { throw erroDe('O painel não respondeu direito. Tenta de novo em instantes.', { rede: true }); }
-  if (!j.ok) throw erroDe(j.erro || 'Erro no painel.', { login: !!j.login, conflito: !!j.conflito });
+  if (!j.ok) {
+    // sessão do app derrubada ou vencida: volta a pedir o login Google
+    if (j.login && ST.sessao && ST.sessao.tipo === 'app') { ST.sessao.token = ''; ST.sessao.exp = 0; ST.sessao.tipo = ''; guardar('sessao'); pintaTopo(); }
+    throw erroDe(j.erro || 'Erro no painel.', { login: !!j.login, conflito: !!j.conflito });
+  }
+  if (ST.sessao && ST.sessao.tipo === 'app') {         // cada uso renova os 30 dias (no painel e aqui)
+    const novo = Math.floor(Date.now() / 1000) + 30 * 86400; if (novo - ST.sessao.exp > 3600) { ST.sessao.exp = novo; guardar('sessao'); }
+  }
   return j.dados;
 }
 
@@ -112,6 +119,7 @@ async function atualizar(silencioso) {
     ST.dados = d; ST.erroLogin = '';
     if (d.usuario && ST.sessao) ST.sessao.nome = d.usuario.nome;
     await guardar('dados', 'sessao');
+    if (ST.sessao && ST.sessao.tipo !== 'app') criarSessao();
   } catch (e) {
     if (e.login) { if (/não tem acesso/.test(e.message)) return sairDeVez(e.message); pedirLogin(); }
     else if (!ST.dados) erroInicio(e.message);
@@ -128,7 +136,7 @@ function telaSemDados() {
   if (atualizando) $('#corpo').innerHTML = `<div class="carregando" style="gap:14px;display:grid;justify-items:center"><i></i><span class="mini" style="text-align:center">Buscando seus dados no painel…<br>Na primeira vez pode levar até 1 minuto.</span></div>`;
   else if (!ST.online) $('#corpo').innerHTML = caixa('Sem internet', 'Conecte o celular à internet para carregar os dados pela primeira vez. Depois o app funciona sem internet.', '<button type="button" class="btn pri" id="tentar">Tentar de novo</button>');
   else if (!tokenValido()) {
-    $('#corpo').innerHTML = caixa('Entre de novo', `O login do Google (${esc(eu())}) vale por uma hora e expirou. Entre de novo para carregar os dados.`, '<div class="gbox" id="gbtn3" style="display:grid;place-items:center;min-height:44px"></div>' + sair);
+    $('#corpo').innerHTML = caixa('Entre de novo', `O login de ${esc(eu())} venceu ou este aparelho foi desconectado. Entre de novo para carregar os dados.`, '<div class="gbox" id="gbtn3" style="display:grid;place-items:center;min-height:44px"></div>' + sair);
     try { google.accounts.id.renderButton($('#gbtn3'), { theme: 'filled_blue', size: 'large', shape: 'pill', text: 'continue_with', locale: 'pt-BR' }); } catch (e) { $('#gbtn3').textContent = 'Carregando o login do Google…'; }
     renovarLogin();
   }
@@ -220,10 +228,26 @@ async function entrou(cred) {
   ST.sessao = { token: cred, exp: p.exp || 0, email, nome: (ST.sessao && ST.sessao.email === email && ST.sessao.nome) || p.given_name || p.name || '' };
   ST.erroLogin = '';
   await guardar('sessao');
+  await criarSessao();
   document.querySelectorAll('.login').forEach(x => x.remove()); fecharFolha(true);
   if (!ST.dados) $('#corpo').innerHTML = '<div class="carregando"><i></i></div>';
   await atualizar();
   enviarFila();
+}
+/** Depois do login Google, pede ao painel a sessão do app (30 dias sem pedir o Google de novo; cada uso renova). */
+async function criarSessao() {
+  if (!ST.sessao || ST.sessao.tipo === 'app' || !tokenValido() || !ST.online) return;
+  try {
+    const r = await api('sessao', { aparelho: nomeAparelho() });
+    ST.sessao = Object.assign({}, ST.sessao, { token: r.sessao, tipo: 'app', exp: Math.floor(Date.now() / 1000) + (r.dias || 30) * 86400 });
+    await guardar('sessao'); pintaTopo();
+  } catch (e) { /* sem sessão agora: segue com o login Google (1 hora) e tenta de novo na próxima atualização */ }
+}
+function nomeAparelho() {
+  const u = navigator.userAgent || '';
+  const so = /iPhone/.test(u) ? 'iPhone' : /iPad/.test(u) ? 'iPad' : /Android/.test(u) ? 'Android' : /Windows/.test(u) ? 'Windows' : /Mac OS/.test(u) ? 'Mac' : 'Celular';
+  const nav = /SamsungBrowser/.test(u) ? 'Samsung Internet' : /EdgA?\//.test(u) ? 'Edge' : /CriOS|Chrome\//.test(u) ? 'Chrome' : /Firefox|FxiOS/.test(u) ? 'Firefox' : /Safari/.test(u) ? 'Safari' : 'navegador';
+  return so + ' · ' + nav + (matchMedia('(display-mode: standalone)').matches ? ' (app instalado)' : '');
 }
 /** Precisa entrar de novo: sem dados guardados, tela de login; com dados, o app continua e o topo avisa. */
 function pedirLogin() { if (!ST.dados) telaLogin(); else { renovarLogin(); pintaTopo(); } }
@@ -247,7 +271,7 @@ function telaLogin() {
 }
 function folhaLogin() {
   const f = abrirFolha(`<div class="folha-cab"><h3>Entrar de novo</h3></div><div class="folha-corpo det">
-    <span class="mini">O login do Google vale por uma hora. Entre de novo para enviar o que está guardado no celular e ver os lançamentos mais novos.</span>
+    <span class="mini">Seu login venceu (30 dias sem usar o app) ou este aparelho foi desconectado no painel. Entre de novo para enviar o que está guardado no celular e ver os lançamentos mais novos.</span>
     <div class="gbox" id="gbtn2" style="display:grid;place-items:center;min-height:44px"></div></div>`);
   try { google.accounts.id.renderButton(f.querySelector('#gbtn2'), { theme: 'filled_blue', size: 'large', shape: 'pill', text: 'continue_with', locale: 'pt-BR' }); } catch (e) { f.querySelector('#gbtn2').textContent = 'Sem internet agora.'; }
 }
@@ -266,8 +290,10 @@ function tela() {
   if (!ST.sessao) { telaLogin(); return; }
   document.querySelectorAll('.login').forEach(x => x.remove());
   if (!ST.dados) { telaSemDados(); return; }
-  $('#abaPers').hidden = !temPersonal(); if (ST.aba === 'pers' && !temPersonal()) ST.aba = 'novo';
-  $('#abaRel').hidden = !temRelatorios(); if (ST.aba === 'rel' && !temRelatorios()) ST.aba = 'novo';
+  // (index.html antigo sem alguma aba não pode travar o app)
+  const ap = $('#abaPers'), ar = $('#abaRel');
+  if (ap) ap.hidden = !temPersonal(); if (ST.aba === 'pers' && !(ap && temPersonal())) ST.aba = 'novo';
+  if (ar) ar.hidden = !temRelatorios(); if (ST.aba === 'rel' && !(ar && temRelatorios())) ST.aba = 'novo';
   document.querySelectorAll('[data-aba]').forEach(b => b.setAttribute('aria-current', b.dataset.aba === ST.aba ? 'page' : 'false'));
   $('#titulo').firstChild.textContent = ST.aba === 'novo' ? (R && R.id ? 'Editar lançamento' : 'Novo lançamento') : ST.aba === 'lista' ? 'Lançamentos' : ST.aba === 'pers' ? 'Personal' : ST.aba === 'rel' ? 'Relatórios' : 'Conta';
   $('#quem').textContent = ST.dados.usuario ? ST.dados.usuario.nome : '';
@@ -734,7 +760,7 @@ function folhaDadosRel() {
 /* ---------- conta ---------- */
 function telaConta() {
   const n = ST.fila.length, u = ST.dados.usuario || {};
-  $('#corpo').innerHTML = `${faixaTeste()}<div class="cartao"><span class="rot">Conectado como</span><b style="font-size:17px;color:var(--navy)">${esc(u.nome)}</b><span class="mini">${esc(eu())}</span></div>
+  $('#corpo').innerHTML = `${faixaTeste()}<div class="cartao"><span class="rot">Conectado como</span><b style="font-size:17px;color:var(--navy)">${esc(u.nome)}</b><span class="mini">${esc(eu())}</span>${ST.sessao && ST.sessao.tipo === 'app' ? `<span class="mini">Conectado neste aparelho. Só pede o login de novo se ficar 30 dias sem usar o app (até ${new Date(ST.sessao.exp * 1000).toLocaleDateString('pt-BR')}, renova a cada uso).</span>` : ''}</div>
   <div class="cartao"><span class="rot">Sincronização</span><span>${n ? `<b>${n}</b> envio${n === 1 ? '' : 's'} guardado${n === 1 ? '' : 's'} no celular${ST.online ? '' : ', aguardando internet'}.` : 'Tudo enviado para o painel.'}</span>
     ${ST.recusados.length ? `<span style="color:var(--neg);font-weight:700">${ST.recusados.length} não aceito${ST.recusados.length === 1 ? '' : 's'} pelo painel: veja em Lançamentos.</span>` : ''}
     <span class="mini">Atualizado em ${esc(String(ST.dados.agora || '').replace(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}:\d{2}).*/, '$3/$2/$1 às $4'))}. Planos de contas e listas vêm do painel: o que mudar lá aparece aqui na próxima atualização.</span>
@@ -747,6 +773,7 @@ function telaConta() {
     const b = $('#sair');
     if (ST.fila.length) { aviso(`Ainda há ${ST.fila.length} envio(s) guardado(s) no celular. Conecte à internet para enviar antes de sair.`, true); return; }
     if (!b.dataset.c) { b.dataset.c = 1; b.textContent = 'Toque de novo para sair'; return; }
+    if (ST.online && tokenValido()) { b.textContent = 'Saindo…'; try { await api('sair'); } catch (e) { } }
     await sairDeVez('');
   };
 }
