@@ -4,7 +4,7 @@
  * - Login Google: o painel confere o login e a lista de e-mails autorizados (nada disso fica aqui).
  */
 'use strict';
-const APP_VERSAO = '7';
+const APP_VERSAO = '8';
 const CFG = window.HM_CONFIG || {};
 
 /* ================================================================== */
@@ -15,6 +15,7 @@ const brl = c => (c < 0 ? '-' : '') + 'R$ ' + (Math.abs(c) / 100).toFixed(2).rep
 const centsDe = t => { const d = String(t).replace(/\D/g, ''); return d ? parseInt(d.slice(-11), 10) : 0; };
 const MES = ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro'];
 const agoraLocal = () => { const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 16); };
+const dataHoraBR = s => { const m = String(s || '').match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}:\d{2})/); return m ? `${m[3]}/${m[2]}/${m[1]} ${m[4]}` : s; };
 const hojeISO = () => agoraLocal().slice(0, 10);
 const dataBR = d => d.slice(8, 10) + '/' + d.slice(5, 7) + '/' + d.slice(0, 4);
 const reduz = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -57,6 +58,7 @@ const naLista = (k, planoId) => !!planoId && lista(k).some(x => x.ativo && x.pla
 const extrasDe = planoId => ({ viagem: naLista('plano_reembolsavel', planoId) || naLista('plano_farid', planoId), farid: naLista('plano_farid', planoId), fazenda: naLista('plano_fazenda', planoId) });
 const formaNome = id => nomeOpcao('forma', id);
 const veTodos = () => !(ST.dados && ST.dados.usuario && ST.dados.usuario.todos === false);
+const ehAdmin = () => !!(ST.dados && ST.dados.usuario && ST.dados.usuario.admin);
 const temPersonal = () => !!(ST.dados && ST.dados.usuario && ST.dados.usuario.personal && ST.dados.personal);
 
 /** O que aparece na tela: o que veio do painel + o que ainda está na fila (e os recusados, para corrigir). */
@@ -67,7 +69,7 @@ function vista() {
   const comoLanc = (op, marca) => {
     const x = op.dados, antes = lanc.find(l => l.id === x.id) || {};
     return Object.assign({}, antes, {
-      id: x.id, data: x.data, usuario: (ST.dados && ST.dados.usuario && ST.dados.usuario.nome) || '', dono: eu(), valor: x.valor, desc: x.desc, estabId: x.estabId || '', formaId: x.formaId,
+      id: x.id, data: x.data, usuario: antes.usuario || (ST.dados && ST.dados.usuario && ST.dados.usuario.nome) || '', dono: antes.dono || eu(), valor: x.valor, desc: x.desc, estabId: x.estabId || '', formaId: x.formaId,
       parcelas: x.parcelas || 1, obs: x.obs || '', fotoId: x.tirarFoto ? '' : antes.fotoId, miniatura: op.miniatura || (x.tirarFoto ? '' : antes.miniatura),
       partes: x.partes.map(p => Object.assign({ plano: (planoPorId(p.planoId) || {}).nome || '' }, p)), status: marca.status, erro: marca.erro || '', envio: op.envio
     });
@@ -356,6 +358,7 @@ function telaNovo() {
     <div class="campo"><label class="rot" for="obs">Observação</label><textarea id="obs" placeholder="Opcional" maxlength="500">${esc(R.obs)}</textarea></div>
   </div>
   <div style="display:flex;flex-direction:column;gap:8px;margin-top:14px">
+    ${R.id && R.dono && R.dono !== eu() ? `<div class="faixa" role="note"><span>Alterando como <b>administrador</b> o lançamento de <b>${esc(R.donoNome || '')}</b>. Ele continua sendo de ${esc(R.donoNome || '')}; o histórico registra a sua alteração.</span></div>` : ''}
     <button type="button" class="btn pri" id="salvar">${R.id ? 'Salvar alterações' : 'Salvar lançamento'}</button>
     ${R.id ? `<button type="button" class="btn sec" id="cancelarEd">Cancelar edição</button>` : ''}
     <span class="mini" id="erro" role="alert" style="text-align:center;color:var(--neg);font-weight:700"></span>
@@ -536,7 +539,7 @@ function telaLista() {
 const fotos = {};   // fotos já baixadas nesta abertura
 function detalhe(l) {
   if (!l) return;
-  const meu = l.dono === eu(), d = new Date(l.data);
+  const meu = l.dono === eu(), pode = meu || ehAdmin(), d = new Date(l.data);
   const extras = p => [p.viagemId && ['Despesa de viagem', nomeOpcao('tipo_viagem', p.viagemId)], p.unidadeId && ['Unidade Farid', nomeOpcao('unidade_farid', p.unidadeId)],
     p.unidadeId && ['Verba diretor', p.verba ? 'Sim · ' + brl(p.valorVerba) : 'Não'], p.fazendaId && ['Tipo fazenda', nomeOpcao('tipo_fazenda', p.fazendaId)]].filter(Boolean).map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join('');
   const tag = l.status === 'fila' ? '<span class="tag" style="background:var(--warn-bg);color:var(--warn)">Aguardando envio · guardado no celular</span>'
@@ -544,12 +547,14 @@ function detalhe(l) {
       : l.status === 'ok' ? '<span class="tag" style="background:var(--ok-bg);color:var(--ok)">Encontrado na fatura/extrato</span>' : '<span class="tag" style="background:var(--soft);color:var(--muted)">Aguardando a fatura/extrato chegar no painel</span>';
   const f = abrirFolha(`<div class="folha-cab"><h3>${esc(l.desc)}<span>${brl(l.valor)}</span></h3></div><div class="folha-corpo det">
     ${tag}
-    <dl><dt>Data</dt><dd>${d.toLocaleDateString('pt-BR')} ${d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</dd><dt>Lançado por</dt><dd>${esc(l.usuario)}</dd>
+    <dl><dt>Data</dt><dd>${d.toLocaleDateString('pt-BR')} ${d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</dd><dt>Lançado por</dt><dd>${esc(l.usuario)}</dd>${l.alteradoPor ? `<dt>Alterado por</dt><dd>${esc(l.alteradoPor)}</dd>` : ''}
       <dt>Pagamento</dt><dd>${esc(formaNome(l.formaId))}${l.parcelas > 1 ? ' · ' + l.parcelas + '×' : ''}</dd>${l.estabId ? `<dt>Estabelecimento</dt><dd>${esc(nomeOpcao('estabelecimento', l.estabId))}</dd>` : ''}${l.obs ? `<dt>Observação</dt><dd>${esc(l.obs)}</dd>` : ''}</dl>
     <div class="cartao" style="padding:12px"><span class="rot">${l.partes.length > 1 ? 'Dividida em ' + l.partes.length + ' planos' : 'Plano de contas'}</span>
       ${l.partes.map(p => `<dl><dt style="color:var(--navy);font-weight:800">${esc(planoNome(p.planoId) || p.plano)}</dt><dd>${brl(p.valor)}</dd>${extras(p)}</dl>`).join('<hr style="border:0;border-top:1px dashed var(--line);margin:4px 0">')}</div>
     <div id="fotoDet">${l.miniatura ? `<img src="${l.miniatura}" alt="Comprovante" style="max-width:100%;border-radius:12px;border:1px solid var(--line)">` : l.fotoId ? (fotos[l.id] ? `<img src="${fotos[l.id]}" alt="Comprovante" style="max-width:100%;border-radius:12px;border:1px solid var(--line)">` : '<button type="button" class="btn sec" id="verFoto" style="width:100%">Ver comprovante</button>') : ''}</div>
-    ${meu ? `<div class="acoes"><button type="button" class="btn sec" id="ed">${l.status === 'erro' ? 'Corrigir' : 'Editar'}</button><button type="button" class="btn neg" id="ex">${l.status === 'erro' ? 'Descartar' : 'Excluir'}</button></div>` : `<span class="mini" style="text-align:center">Lançado por ${esc(l.usuario)}: só quem lançou pode alterar.</span>`}
+    ${l.status !== 'fila' && l.status !== 'erro' ? `<button type="button" class="btn sec" id="verHist" style="width:100%">Histórico de alterações</button><div id="hist" aria-live="polite"></div>` : ''}
+    ${!meu && pode && l.status !== 'erro' ? '<span class="mini" style="text-align:center">Você é administrador: pode alterar este lançamento. Ele continua sendo de ' + esc(l.usuario) + '.</span>' : ''}
+    ${pode ? `<div class="acoes"><button type="button" class="btn sec" id="ed">${l.status === 'erro' ? 'Corrigir' : 'Editar'}</button><button type="button" class="btn neg" id="ex">${l.status === 'erro' ? 'Descartar' : 'Excluir'}</button></div>` : `<span class="mini" style="text-align:center">Lançado por ${esc(l.usuario)}: só quem lançou pode alterar.</span>`}
   </div>`);
   const vf = f.querySelector('#verFoto');
   if (vf) vf.onclick = async () => {
@@ -557,10 +562,22 @@ function detalhe(l) {
     try { const r = await api('foto', { id: l.id }); fotos[l.id] = r.foto; f.querySelector('#fotoDet').innerHTML = `<img src="${r.foto}" alt="Comprovante" style="max-width:100%;border-radius:12px;border:1px solid var(--line)">`; }
     catch (e) { vf.disabled = false; vf.textContent = e.rede ? 'Sem internet: tente depois' : e.login ? 'Entre de novo para ver' : e.message; }
   };
-  if (!meu) return;
+  const vh = f.querySelector('#verHist');
+  if (vh) vh.onclick = async () => {
+    const box = f.querySelector('#hist'); vh.disabled = true; vh.textContent = 'Carregando o histórico…';
+    try {
+      const r = await api('historico', { id: l.id });
+      vh.remove();
+      box.innerHTML = r.historico.length ? `<div class="cartao" style="padding:12px"><span class="rot">Histórico de alterações</span><ol class="hist">${r.historico.map(h => `<li>
+        <span class="hq">${esc(dataHoraBR(h.quando))} · <b>${esc(h.quem)}</b></span>
+        <span class="hc">${esc(h.campo)}${h.antes !== '' ? `: <s>${esc(h.antes)}</s> → ${esc(h.depois)}` : `: ${esc(h.depois)}`}</span></li>`).join('')}</ol></div>`
+        : '<span class="mini">Nenhuma alteração registrada.</span>';
+    } catch (e) { vh.disabled = false; vh.textContent = e.rede ? 'Sem internet: tente depois' : e.login ? 'Entre de novo para ver' : e.message; }
+  };
+  if (!pode) return;
   f.querySelector('#ed').onclick = () => {
     fecharFolha();
-    R = { id: l.id, versao: l.status === 'fila' || l.status === 'erro' ? (ST.dados.lancamentos.find(x => x.id === l.id) || {}).versao || null : l.versao, data: l.data, valor: l.valor, desc: l.desc, estabId: l.estabId, formaId: l.formaId, parcelas: l.parcelas, obs: l.obs,
+    R = { id: l.id, dono: l.dono, donoNome: l.usuario, versao: l.status === 'fila' || l.status === 'erro' ? (ST.dados.lancamentos.find(x => x.id === l.id) || {}).versao || null : l.versao, data: l.data, valor: l.valor, desc: l.desc, estabId: l.estabId, formaId: l.formaId, parcelas: l.parcelas, obs: l.obs,
       foto: null, miniatura: l.miniatura || null, fotoId: l.fotoId || '', tirarFoto: false, dividir: l.partes.length > 1, partes: l.partes.map(p => Object.assign(parteVazia(), p)) };
     // foto nova ainda na fila: continua indo junto
     const op = ST.fila.concat(ST.recusados).filter(o => o.tipo === 'salvar' && o.dados.id === l.id).pop(); if (op && op.dados.foto) R.foto = op.dados.foto;
