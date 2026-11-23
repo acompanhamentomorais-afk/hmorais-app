@@ -1,0 +1,682 @@
+/* H Morais Lançamentos · app do celular (PWA) ligado ao Painel Financeiro.
+ * - Funciona sem internet: os dados ficam no celular (IndexedDB) e o que for lançado entra numa fila,
+ *   enviada sozinha quando a internet volta. Cada envio tem um código: reenviar não duplica no painel.
+ * - Login Google: o painel confere o login e a lista de e-mails autorizados (nada disso fica aqui).
+ */
+'use strict';
+const APP_VERSAO = '1';
+const CFG = window.HM_CONFIG || {};
+
+/* ================================================================== */
+/* Utilidades                                                           */
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const brl = c => (c < 0 ? '-' : '') + 'R$ ' + (Math.abs(c) / 100).toFixed(2).replace('.', ',').replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+const centsDe = t => { const d = String(t).replace(/\D/g, ''); return d ? parseInt(d.slice(-11), 10) : 0; };
+const MES = ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro'];
+const agoraLocal = () => { const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 16); };
+const hojeISO = () => agoraLocal().slice(0, 10);
+const dataBR = d => d.slice(8, 10) + '/' + d.slice(5, 7) + '/' + d.slice(0, 4);
+const reduz = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 3 | 8)).toString(16); }));
+const idPers = idApp => 'PA' + String(idApp).replace(/[^A-Za-z0-9]/g, '').slice(0, 24).toUpperCase();   // mesmo ID que o painel grava
+const ehCredito = nome => /cr[ée]dito/i.test(nome || '');
+const CHEV = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M6 9l6 6 6-6"/></svg>';
+
+/* ---------- guardar no celular (IndexedDB; sem ele, só na memória) ---------- */
+const BD = (() => {
+  let db = null, mem = {};
+  const abrir = () => new Promise(res => {
+    try { const r = indexedDB.open('hmorais-app', 1); r.onupgradeneeded = () => r.result.createObjectStore('kv'); r.onsuccess = () => { db = r.result; res(); }; r.onerror = () => res(); }
+    catch (e) { res(); }
+  });
+  const pronto = abrir();
+  return {
+    async get(k) { await pronto; if (!db) return mem[k]; return new Promise(res => { try { const q = db.transaction('kv').objectStore('kv').get(k); q.onsuccess = () => res(q.result); q.onerror = () => res(mem[k]); } catch (e) { res(mem[k]); } }); },
+    async set(k, v) { mem[k] = v; await pronto; if (!db) return; return new Promise(res => { try { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = () => res(); t.onerror = () => res(); } catch (e) { res(); } }); },
+    async del(k) { delete mem[k]; await pronto; if (!db) return; return new Promise(res => { try { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').delete(k); t.oncomplete = () => res(); t.onerror = () => res(); } catch (e) { res(); } }); }
+  };
+})();
+
+/* ================================================================== */
+/* Estado                                                               */
+/*  sessao: {token, exp, email, nome}  · dados: o que o painel mandou (planos, listas, lançamentos, personal)
+ *  fila: envios pendentes, na ordem  · recusados: lançamentos que o painel não aceitou (para corrigir)        */
+const ST = { sessao: null, dados: null, fila: [], recusados: [], aba: 'novo', filtro: { mes: '', quem: 'todos', q: '', plano: '', forma: '' }, online: navigator.onLine, erroLogin: '' };
+let R = null;                 // rascunho do formulário
+let enviando = false, atualizando = false, gis = false, renovando = null;
+const guardar = (...ks) => Promise.all(ks.map(k => BD.set(k, k === 'rascunho' ? R : ST[k])));
+
+const eu = () => (ST.sessao ? ST.sessao.email : '');
+const planos = () => ((ST.dados && ST.dados.planos) || []);
+const planoPorId = id => planos().find(p => p.id === id);
+const lista = k => ((ST.dados && ST.dados.listas && ST.dados.listas[k]) || []);
+const opcao = (k, id) => lista(k).find(x => x.id === id);
+const nomeOpcao = (k, id) => (opcao(k, id) || {}).valor || '';
+const naLista = (k, planoId) => !!planoId && lista(k).some(x => x.ativo && x.planoId === planoId);
+const extrasDe = planoId => ({ viagem: naLista('plano_reembolsavel', planoId) || naLista('plano_farid', planoId), farid: naLista('plano_farid', planoId), fazenda: naLista('plano_fazenda', planoId) });
+const formaNome = id => nomeOpcao('forma', id);
+const temPersonal = () => !!(ST.dados && ST.dados.usuario && ST.dados.usuario.personal && ST.dados.personal);
+
+/** O que aparece na tela: o que veio do painel + o que ainda está na fila (e os recusados, para corrigir). */
+function vista() {
+  const d = ST.dados || {};
+  let lanc = (d.lancamentos || []).map(l => Object.assign({}, l));
+  const pers = d.personal ? { locais: d.personal.locais || [], lanc: (d.personal.lanc || []).map(x => Object.assign({}, x)) } : null;
+  const comoLanc = (op, marca) => {
+    const x = op.dados, antes = lanc.find(l => l.id === x.id) || {};
+    return Object.assign({}, antes, {
+      id: x.id, data: x.data, usuario: (ST.dados && ST.dados.usuario && ST.dados.usuario.nome) || '', dono: eu(), valor: x.valor, desc: x.desc, estabId: x.estabId || '', formaId: x.formaId,
+      parcelas: x.parcelas || 1, obs: x.obs || '', fotoId: x.tirarFoto ? '' : antes.fotoId, miniatura: op.miniatura || (x.tirarFoto ? '' : antes.miniatura),
+      partes: x.partes.map(p => Object.assign({ plano: (planoPorId(p.planoId) || {}).nome || '' }, p)), status: marca.status, erro: marca.erro || '', envio: op.envio
+    });
+  };
+  const aplica = (op, marca) => {
+    if (op.tipo === 'salvar') { const l = comoLanc(op, marca), i = lanc.findIndex(x => x.id === l.id); if (i >= 0) lanc[i] = l; else lanc.unshift(l); }
+    else if (op.tipo === 'excluir') lanc = lanc.filter(x => x.id !== op.dados.id);
+    else if (op.tipo === 'personal' && pers) {
+      if (op.dados.acao === 'cancelar') { const x = pers.lanc.find(y => y.id === op.dados.id); if (x) { x.cancelado = true; x.fila = true; } }
+      else if (!pers.lanc.some(y => y.id === idPers(op.dados.idApp))) pers.lanc.push({ id: idPers(op.dados.idApp), data: op.dados.data, localId: op.dados.localId, tipo: op.dados.tipo, qtd: op.dados.qtd, cancelado: false, fila: true, criadoEm: '9' });
+    }
+  };
+  ST.recusados.forEach(op => aplica(op, { status: 'erro', erro: op.erro }));
+  ST.fila.forEach(op => aplica(op, { status: 'fila' }));
+  return { lanc, pers };
+}
+
+/* ================================================================== */
+/* Conversa com o painel                                                */
+function erroDe(msg, o) { const e = new Error(msg); Object.assign(e, o || {}); return e; }
+async function api(acao, dados) {
+  if (!CFG.API_URL) throw erroDe('O app ainda não foi configurado (falta o endereço do painel em config.js).', { config: true });
+  if (!tokenValido()) throw erroDe('Entre de novo para enviar.', { login: true });
+  const ctl = new AbortController(), t = setTimeout(() => ctl.abort(), 90000);
+  let r;
+  try {
+    // texto simples: o navegador não precisa perguntar antes (sem "preflight"), que o Apps Script não responde
+    r = await fetch(CFG.API_URL, { method: 'POST', body: JSON.stringify({ acao, token: ST.sessao.token, dados: dados || {} }), headers: { 'Content-Type': 'text/plain;charset=utf-8' }, redirect: 'follow', signal: ctl.signal, credentials: 'omit' });
+  } catch (e) { throw erroDe('Sem conexão com o painel.', { rede: true }); }
+  finally { clearTimeout(t); }
+  let j; try { j = await r.json(); } catch (e) { throw erroDe('O painel não respondeu direito. Tenta de novo em instantes.', { rede: true }); }
+  if (!j.ok) throw erroDe(j.erro || 'Erro no painel.', { login: !!j.login, conflito: !!j.conflito });
+  return j.dados;
+}
+
+/** Busca tudo de novo no painel (ao abrir, ao voltar para o app e depois de enviar a fila). */
+async function atualizar(silencioso) {
+  if (atualizando || !ST.online || !tokenValido()) return;
+  atualizando = true;
+  try {
+    const d = await api('inicio');
+    ST.dados = d; ST.erroLogin = '';
+    if (d.usuario && ST.sessao) ST.sessao.nome = d.usuario.nome;
+    await guardar('dados', 'sessao');
+  } catch (e) {
+    if (e.login) { if (/não tem acesso/.test(e.message)) return sairDeVez(e.message); pedirLogin(); }
+    else if (!silencioso && !e.rede) aviso(e.message, true);
+  } finally { atualizando = false; tela(); }
+}
+
+/** Envia a fila, um por vez, na ordem em que foi lançada. */
+async function enviarFila() {
+  if (enviando || !ST.online || !ST.fila.length) return;
+  if (!tokenValido()) { pedirLogin(); return; }
+  enviando = true; pintaTopo();
+  let enviados = 0, parou = false;
+  try {
+    while (ST.fila.length) {
+      const op = ST.fila[0];
+      op.tentou = true; await guardar('fila');
+      let r;
+      try { r = await api(op.tipo === 'excluir' ? 'excluir' : op.tipo, prepararEnvio(op)); }
+      catch (e) {
+        if (e.rede || e.config) { parou = true; break; }
+        if (e.login) { parou = true; pedirLogin(); break; }
+        ST.fila.shift();                                                     // o painel não aceitou: sai da fila
+        if (e.conflito) { aviso(e.message, true); }
+        else if (op.tipo === 'salvar') { ST.recusados = ST.recusados.filter(x => x.dados.id !== op.dados.id).concat([Object.assign({}, op, { erro: e.message })]); aviso('Um lançamento não foi aceito pelo painel. Veja em Lançamentos.', true); }
+        else aviso(e.message, true);
+        await guardar('fila', 'recusados');
+        continue;
+      }
+      ST.fila.shift(); enviados++;
+      aplicarResposta(op, r);
+      ST.recusados = ST.recusados.filter(x => !(op.tipo === 'salvar' && x.dados.id === op.dados.id));
+      await guardar('fila', 'dados', 'recusados');
+      pintaTopo();
+    }
+  } finally { enviando = false; }
+  if (enviados && !ST.fila.length) aviso(enviados === 1 ? 'Enviado para o painel' : `${enviados} lançamentos enviados para o painel`);
+  if (!parou) await atualizar(true); else tela();
+}
+/** Dados do envio. Alteração feita na fila depois de um lançamento novo usa a versão que o painel acabou de devolver. */
+function prepararEnvio(op) {
+  if (op.tipo !== 'salvar') return op.dados;
+  const d = Object.assign({}, op.dados);
+  if (op.seguir) { const l = ((ST.dados && ST.dados.lancamentos) || []).find(x => x.id === d.id); d.versao = l ? l.versao : undefined; }
+  return d;
+}
+function aplicarResposta(op, r) {
+  const D = ST.dados || (ST.dados = { lancamentos: [] });
+  if (op.tipo === 'salvar' && r.lancamento) {
+    const i = D.lancamentos.findIndex(x => x.id === r.lancamento.id);
+    if (i >= 0) D.lancamentos[i] = r.lancamento; else D.lancamentos.unshift(r.lancamento);
+  } else if (op.tipo === 'excluir') D.lancamentos = D.lancamentos.filter(x => x.id !== op.dados.id);
+  else if (op.tipo === 'personal' && r.personal) D.personal = r.personal;
+}
+async function enfileirar(op) {
+  op.envio = op.envio || uuid(); op.criado = Date.now();
+  if (op.tipo === 'salvar') op.dados.envio = op.envio;
+  ST.fila.push(op); await guardar('fila');
+  tela(); enviarFila();
+}
+
+/* ================================================================== */
+/* Login Google                                                         */
+const lerToken = t => { try { return JSON.parse(decodeURIComponent(escape(atob(t.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))))); } catch (e) { return {}; } };
+const tokenValido = () => !!(ST.sessao && ST.sessao.token && ST.sessao.exp * 1000 > Date.now() + 60000);
+
+window.gisPronto = function () {
+  if (!CFG.CLIENT_ID || !window.google || !google.accounts) return;
+  google.accounts.id.initialize({ client_id: CFG.CLIENT_ID, callback: r => entrou(r.credential), auto_select: true, cancel_on_tap_outside: false, itp_support: true, use_fedcm_for_prompt: true });
+  gis = true;
+  if (!ST.sessao) telaLogin();
+  else if (!tokenValido() && ST.online && (ST.fila.length || ST.sessao)) renovarLogin();
+};
+/** Sessão do Google dura 1 hora: renova sozinho (sem tocar em nada, se o Google deixar). */
+function renovarLogin() {
+  if (!gis || renovando) return;
+  renovando = setTimeout(() => { renovando = null; pintaTopo(); }, 10000);
+  try { google.accounts.id.prompt(); } catch (e) { }
+}
+async function entrou(cred) {
+  const p = lerToken(cred), email = String(p.email || '').toLowerCase();
+  if (!email) return;
+  if (ST.sessao && ST.sessao.email !== email) {
+    if (ST.fila.length) { aviso(`Há ${ST.fila.length} envio(s) de ${ST.sessao.email} guardados neste celular. Entre com essa conta para enviar.`, true); return; }
+    ST.dados = null; ST.recusados = []; R = null; await guardar('dados', 'recusados', 'rascunho');
+  }
+  clearTimeout(renovando); renovando = null;
+  ST.sessao = { token: cred, exp: p.exp || 0, email, nome: (ST.sessao && ST.sessao.email === email && ST.sessao.nome) || p.given_name || p.name || '' };
+  ST.erroLogin = '';
+  await guardar('sessao');
+  document.querySelectorAll('.login').forEach(x => x.remove()); fecharFolha(true);
+  if (!ST.dados) $('#corpo').innerHTML = '<div class="carregando"><i></i></div>';
+  await atualizar();
+  enviarFila();
+}
+/** Precisa entrar de novo: sem dados guardados, tela de login; com dados, o app continua e o topo avisa. */
+function pedirLogin() { if (!ST.dados) telaLogin(); else { renovarLogin(); pintaTopo(); } }
+async function sairDeVez(msg) {
+  ST.sessao = null; ST.dados = null; ST.recusados = []; ST.erroLogin = msg || ''; R = null;
+  try { if (gis) google.accounts.id.disableAutoSelect(); } catch (e) { }
+  await Promise.all([BD.del('sessao'), BD.del('dados'), BD.del('recusados'), BD.del('rascunho')]);
+  tela();
+}
+function telaLogin() {
+  let l = $('.login');
+  if (!l) { l = document.createElement('div'); l.className = 'login'; $('#app').appendChild(l); }
+  const motivo = !CFG.CLIENT_ID || !CFG.API_URL ? 'O app ainda não foi configurado: preencha o arquivo config.js (veja o guia de publicação).'
+    : !ST.online ? 'Sem internet. Conecte para entrar pela primeira vez; depois o app funciona sem internet.'
+      : !gis ? 'Carregando o login do Google…' : '';
+  l.innerHTML = `<div class="marca" aria-hidden="true">H</div><h2>H Morais</h2><p>Lançamentos de despesas, ligados ao Painel Financeiro.</p>
+    ${ST.erroLogin ? `<div class="erro" role="alert">${esc(ST.erroLogin)}</div>` : ''}
+    ${motivo ? `<p style="font-size:13px">${esc(motivo)}</p>` : '<div class="gbox" id="gbtn"></div>'}
+    <p style="font-size:12px">Só os e-mails autorizados entram.</p>`;
+  if (!motivo) try { google.accounts.id.renderButton(l.querySelector('#gbtn'), { theme: 'outline', size: 'large', shape: 'pill', text: 'signin_with', locale: 'pt-BR' }); google.accounts.id.prompt(); } catch (e) { }
+}
+function folhaLogin() {
+  const f = abrirFolha(`<div class="folha-cab"><h3>Entrar de novo</h3></div><div class="folha-corpo det">
+    <span class="mini">O login do Google vale por uma hora. Entre de novo para enviar o que está guardado no celular e ver os lançamentos mais novos.</span>
+    <div class="gbox" id="gbtn2" style="display:grid;place-items:center;min-height:44px"></div></div>`);
+  try { google.accounts.id.renderButton(f.querySelector('#gbtn2'), { theme: 'filled_blue', size: 'large', shape: 'pill', text: 'continue_with', locale: 'pt-BR' }); } catch (e) { f.querySelector('#gbtn2').textContent = 'Sem internet agora.'; }
+}
+
+/* ================================================================== */
+/* Telas                                                                */
+function pintaTopo() {
+  const net = $('#net'), fila = ST.fila.length, precisaLogin = ST.sessao && !tokenValido() && ST.online && !renovando;
+  net.className = 'net' + (!ST.online ? ' off' : '') + (enviando ? ' env' : '') + (precisaLogin ? ' entrar' : '');
+  net.querySelector('span').textContent = enviando ? 'Enviando…' : !ST.online ? (fila ? `Sem internet · ${fila}` : 'Sem internet') : precisaLogin ? (fila ? `Entrar para enviar · ${fila}` : 'Entrar de novo') : fila ? `Na fila · ${fila}` : 'Conectado';
+  net.onclick = precisaLogin ? folhaLogin : null;
+  const bol = $('#bolinha'), n = fila + ST.recusados.length; bol.hidden = !n; bol.textContent = n;
+}
+function tela() {
+  pintaTopo();
+  if (!ST.sessao || !ST.dados) { if (!ST.sessao) telaLogin(); return; }
+  document.querySelectorAll('.login').forEach(x => x.remove());
+  $('#abaPers').hidden = !temPersonal(); if (ST.aba === 'pers' && !temPersonal()) ST.aba = 'novo';
+  document.querySelectorAll('[data-aba]').forEach(b => b.setAttribute('aria-current', b.dataset.aba === ST.aba ? 'page' : 'false'));
+  $('#titulo').firstChild.textContent = ST.aba === 'novo' ? (R && R.id ? 'Editar lançamento' : 'Novo lançamento') : ST.aba === 'lista' ? 'Lançamentos' : ST.aba === 'pers' ? 'Personal' : 'Conta';
+  $('#quem').textContent = ST.dados.usuario ? ST.dados.usuario.nome : '';
+  if (ST.aba === 'novo') telaNovo(); else if (ST.aba === 'lista') telaLista(); else if (ST.aba === 'pers') telaPers(); else telaConta();
+}
+const faixaTeste = () => ST.dados.modoTeste ? '<div class="faixa" role="note"><span><b>Modo teste.</b> O que for lançado aqui fica no app e no painel, mas ainda não entra na conciliação nem na DRE.</span></div>' : '';
+
+/* ---------- formulário de lançamento ---------- */
+const novoRascunho = () => ({ id: null, versao: null, data: agoraLocal(), valor: 0, desc: '', estabId: '', formaId: '', parcelas: 1, obs: '', foto: null, miniatura: null, fotoId: '', tirarFoto: false, dividir: false, partes: [parteVazia()] });
+const parteVazia = () => ({ planoId: '', valor: 0, viagemId: '', unidadeId: '', verba: false, valorVerba: 0, fazendaId: '' });
+const somaPartes = () => R.partes.reduce((a, p) => a + (p.valor || 0), 0);
+const salvaRascunho = () => { guardar('rascunho'); };
+const planoNome = id => (planoPorId(id) || {}).nome || '';
+
+function chipsDe(k, i, campo, atual) {
+  return lista(k).filter(x => x.ativo || x.id === atual).map(x => `<button type="button" class="chip" data-x="${i}|${campo}|${esc(x.id)}" aria-pressed="${x.id === atual}">${esc(x.valor)}</button>`).join('');
+}
+function telaNovo() {
+  if (!R) R = novoRascunho();
+  const resto = R.valor - somaPartes(), forma = formaNome(R.formaId);
+  const partesHtml = R.partes.map((p, i) => {
+    const ex = extrasDe(p.planoId);
+    return `<div class="parte${R.dividir ? ' dividida' : ''}">
+      <div class="parte-cab">${R.dividir ? `<span class="n">${i + 1}</span>` : ''}<button type="button" class="sel" data-plano="${i}" aria-haspopup="dialog"><span class="${p.planoId ? '' : 'vazio'}">${esc(planoNome(p.planoId) || 'Escolher plano de contas')}</span>${CHEV}</button>
+        ${R.dividir && R.partes.length > 1 ? `<button type="button" class="ic" data-tirar="${i}" aria-label="Tirar a parte ${i + 1}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg></button>` : ''}</div>
+      ${R.dividir ? `<div class="parte-valor"><input inputmode="numeric" data-pval="${i}" value="${brl(p.valor || 0)}" aria-label="Valor da parte ${i + 1}"></div>` : ''}
+      ${ex.viagem ? `<div class="reemb"><span class="tag">Reembolsável</span>
+        <div class="campo"><span class="rot">Tipo de despesa de viagem</span><div class="chips">${chipsDe('tipo_viagem', i, 'viagemId', p.viagemId)}</div></div>
+        ${ex.farid ? `<div class="campo"><span class="rot">Unidade Farid</span><div class="chips">${chipsDe('unidade_farid', i, 'unidadeId', p.unidadeId)}</div></div>
+        <div class="campo"><span class="rot">Verba diretor</span><div class="chips">${['Não', 'Sim'].map(v => `<button type="button" class="chip" data-x="${i}|verba|${v}" aria-pressed="${(p.verba ? 'Sim' : 'Não') === v}">${v}</button>`).join('')}</div>
+          ${p.verba ? `<div class="campo verba"><label class="rot" for="verba${i}">Valor da verba diretor</label><input inputmode="numeric" class="busca" id="verba${i}" data-verba="${i}" value="${brl(p.valorVerba || 0)}" aria-describedby="verbaMsg${i}"><span class="verba-msg" id="verbaMsg${i}"></span></div>` : ''}</div>` : ''}</div>` : ''}
+      ${ex.fazenda ? `<div class="reemb"><div class="campo"><span class="rot">Tipo de despesa da fazenda</span><div class="chips">${chipsDe('tipo_fazenda', i, 'fazendaId', p.fazendaId)}</div></div></div>` : ''}
+    </div>`;
+  }).join('');
+  const foto = R.miniatura ? `<img src="${R.miniatura}" alt="Foto do comprovante">` : R.fotoId && !R.tirarFoto ? '<span class="tag">Comprovante salvo</span>' : '';
+  const temFoto = R.miniatura || (R.fotoId && !R.tirarFoto);
+  const descs = [...new Set(vista().lanc.filter(l => l.dono === eu()).map(l => l.desc))].slice(0, 60);
+  $('#corpo').innerHTML = `${faixaTeste()}
+  <div class="cartao">
+    <div class="valor-box"><span class="rot">Valor total</span><input class="valor-in" id="valor" inputmode="numeric" value="${brl(R.valor)}" aria-label="Valor total"></div>
+    <div class="campo"><label class="rot" for="desc">Descrição</label><input type="text" id="desc" value="${esc(R.desc)}" placeholder="Ex.: Supermercado, almoço com cliente" list="descs" autocomplete="off" maxlength="200"><datalist id="descs">${descs.map(d => `<option value="${esc(d)}">`).join('')}</datalist></div>
+    <div class="campo"><span class="rot">${R.dividir ? 'Planos de contas' : 'Plano de contas'}</span>
+      <div class="partes">${partesHtml}</div>
+      ${R.dividir ? `<div class="resto ${resto === 0 ? 'ok' : resto < 0 ? 'neg' : ''}" role="status"><span>${resto === 0 ? 'Distribuído ✓' : resto > 0 ? 'Falta distribuir ' + brl(resto) : 'Passou do total em ' + brl(-resto)}</span><button type="button" id="ajusta" ${resto === 0 ? 'hidden' : ''}>Ajustar última parte</button></div>
+        ${R.partes.length < 10 ? `<button type="button" class="btn sec" id="addParte"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 5v14M5 12h14"/></svg>Adicionar parte</button>` : ''}
+        <button type="button" class="btn" id="juntar" style="color:var(--muted);min-height:36px">Voltar para um plano só</button>`
+      : `<button type="button" class="btn ouro" id="dividir"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v7M12 10l-6 6v5M12 10l6 6v5"/></svg>Dividir em planos</button>`}
+    </div>
+  </div>
+  <div class="cartao">
+    <div class="campo"><span class="rot">Forma de pagamento</span><button type="button" class="sel" id="forma" aria-haspopup="dialog"><span class="${forma ? '' : 'vazio'}">${esc(forma || 'Escolher')}</span>${CHEV}</button></div>
+    ${ehCredito(forma) ? `<div class="campo"><span class="rot">Parcelas</span><div class="passo"><button type="button" id="pmenos" aria-label="Menos parcelas">−</button><b id="parcTxt">${txtParc()}</b><button type="button" id="pmais" aria-label="Mais parcelas">+</button></div></div>` : ''}
+    <div class="campo"><span class="rot">Estabelecimento</span><button type="button" class="sel" id="estab" aria-haspopup="dialog"><span class="${R.estabId ? '' : 'vazio'}">${esc(nomeOpcao('estabelecimento', R.estabId) || 'Escolher (opcional)')}</span>${CHEV}</button></div>
+    <div class="campo"><label class="rot" for="data">Data e hora</label><input type="datetime-local" id="data" value="${esc(R.data)}"></div>
+    <div class="campo"><span class="rot">Comprovante</span><div class="foto">${foto}<label class="btn sec" for="fotoIn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>${temFoto ? 'Trocar foto' : 'Fotografar ou escolher'}</label>${temFoto ? '<button type="button" class="ic" id="tiraFoto" aria-label="Remover a foto"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg></button>' : ''}<input type="file" id="fotoIn" accept="image/*" hidden></div></div>
+    <div class="campo"><label class="rot" for="obs">Observação</label><textarea id="obs" placeholder="Opcional" maxlength="500">${esc(R.obs)}</textarea></div>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:8px;margin-top:14px">
+    <button type="button" class="btn pri" id="salvar">${R.id ? 'Salvar alterações' : 'Salvar lançamento'}</button>
+    ${R.id ? `<button type="button" class="btn sec" id="cancelarEd">Cancelar edição</button>` : ''}
+    <span class="mini" id="erro" role="alert" style="text-align:center;color:var(--neg);font-weight:700"></span>
+  </div>`;
+  ligarNovo();
+}
+/** Campo de dinheiro: os dígitos entram pela direita (como na maquininha). Ao tocar no campo, o que se digita começa do zero. */
+function dinheiro(el, set) {
+  let novo = true, c = centsDe(el.value);
+  const pinta = () => { el.value = brl(c); set(c); try { el.setSelectionRange(el.value.length, el.value.length); } catch (e) { } };
+  el.onfocus = () => { novo = true; c = centsDe(el.value); setTimeout(() => { if (document.activeElement === el && novo) el.select(); }); };
+  el.addEventListener('beforeinput', e => {
+    const t = e.inputType;
+    if (t === 'insertText' && e.data && /^\d+$/.test(e.data)) { e.preventDefault(); c = Math.min(99999999999, (novo ? 0 : c) * Math.pow(10, e.data.length) + parseInt(e.data, 10)); novo = false; pinta(); }
+    else if (t === 'deleteContentBackward' || t === 'deleteContentForward') { e.preventDefault(); c = novo ? 0 : Math.floor(c / 10); novo = false; pinta(); }
+    else if (t === 'insertText') e.preventDefault();
+  });
+  el.oninput = () => { c = centsDe(el.value); novo = false; pinta(); };   // colar, ou teclado que não avisa antes
+}
+function ligarNovo() {
+  const ref = () => { salvaRascunho(); tela(); };
+  dinheiro($('#valor'), c => { R.valor = c; if (!R.dividir) R.partes[0].valor = c; salvaRascunho(); atualizarResto(); });
+  $('#desc').oninput = e => { R.desc = e.target.value; salvaRascunho(); };
+  $('#obs').oninput = e => { R.obs = e.target.value; salvaRascunho(); };
+  $('#data').onchange = e => { R.data = e.target.value; salvaRascunho(); };
+  document.querySelectorAll('[data-plano]').forEach(b => b.onclick = async () => {
+    const i = +b.dataset.plano;
+    const v = await escolher('Plano de contas', itensPlanos(), R.partes[i].planoId, { recentes: recentes() });
+    if (v == null) return;
+    Object.assign(R.partes[i], { planoId: v, viagemId: '', unidadeId: '', verba: false, valorVerba: 0, fazendaId: '' }); ref();
+  });
+  document.querySelectorAll('[data-pval]').forEach(el => dinheiro(el, c => { R.partes[+el.dataset.pval].valor = c; salvaRascunho(); atualizarResto(); }));
+  document.querySelectorAll('[data-x]').forEach(b => b.onclick = () => {
+    const [i, k, v] = b.dataset.x.split('|'), p = R.partes[+i];
+    if (k === 'verba') { p.verba = v === 'Sim'; if (!p.verba) p.valorVerba = 0; }
+    else p[k] = p[k] === v ? '' : v;
+    ref();
+  });
+  document.querySelectorAll('[data-verba]').forEach(el => dinheiro(el, c => { R.partes[+el.dataset.verba].valorVerba = c; salvaRascunho(); checarVerba(); }));
+  checarVerba();
+  document.querySelectorAll('[data-tirar]').forEach(b => b.onclick = () => { R.partes.splice(+b.dataset.tirar, 1); ref(); });
+  const dv = $('#dividir'); if (dv) dv.onclick = () => { R.dividir = true; R.partes[0].valor = R.valor; R.partes.push(parteVazia()); ref(); setTimeout(() => { const ins = document.querySelectorAll('[data-pval]'); if (ins[0]) ins[0].focus(); }, 50); };
+  const ad = $('#addParte'); if (ad) ad.onclick = () => { R.partes.push(Object.assign(parteVazia(), { valor: Math.max(0, R.valor - somaPartes()) })); ref(); };
+  const ju = $('#juntar'); if (ju) ju.onclick = () => { R.dividir = false; R.partes = [Object.assign(R.partes.find(p => p.planoId) || R.partes[0], { valor: R.valor })]; ref(); };
+  const aj = $('#ajusta'); if (aj) aj.onclick = () => { if (R.valor === somaPartes()) return; const ult = R.partes[R.partes.length - 1]; ult.valor = Math.max(0, ult.valor + (R.valor - somaPartes())); ref(); };
+  $('#forma').onclick = async () => { const v = await escolher('Forma de pagamento', itensLista('forma', R.formaId), R.formaId); if (v == null) return; R.formaId = v; if (!ehCredito(formaNome(v))) R.parcelas = 1; ref(); };
+  $('#estab').onclick = async () => { const v = await escolher('Estabelecimento', itensLista('estabelecimento', R.estabId, true), R.estabId, { limpar: 'Sem estabelecimento' }); if (v == null) return; R.estabId = v; ref(); };
+  const pm = $('#pmenos'), pM = $('#pmais');
+  if (pm) { pm.onclick = () => { R.parcelas = Math.max(1, R.parcelas - 1); ref(); }; pM.onclick = () => { R.parcelas = Math.min(24, R.parcelas + 1); ref(); }; }
+  $('#fotoIn').onchange = async e => { const f = e.target.files[0]; if (!f) return; try { const r = await prepararFoto(f); R.foto = r.foto; R.miniatura = r.mini; R.tirarFoto = false; ref(); } catch (er) { $('#erro').textContent = 'Não consegui abrir essa foto.'; } };
+  const tf = $('#tiraFoto'); if (tf) tf.onclick = () => { R.foto = null; R.miniatura = null; R.tirarFoto = !!R.fotoId; ref(); };
+  const ce = $('#cancelarEd'); if (ce) ce.onclick = () => { R = novoRascunho(); salvaRascunho(); ST.aba = 'lista'; tela(); };
+  $('#salvar').onclick = salvar;
+}
+/** Foto do comprovante: reduzida no próprio celular (até 1600 px) e uma miniatura para mostrar. */
+function prepararFoto(arq) {
+  return new Promise((res, rej) => {
+    const url = URL.createObjectURL(arq), img = new Image();
+    img.onload = () => {
+      const faz = max => { const k = Math.min(1, max / Math.max(img.width, img.height)), c = document.createElement('canvas'); c.width = Math.round(img.width * k); c.height = Math.round(img.height * k); c.getContext('2d').drawImage(img, 0, 0, c.width, c.height); return c.toDataURL('image/jpeg', max > 400 ? 0.72 : 0.7); };
+      try { res({ foto: faz(1600), mini: faz(320) }); } catch (e) { rej(e); } finally { URL.revokeObjectURL(url); }
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); rej(new Error('foto')); };
+    img.src = url;
+  });
+}
+const valorDaParte = i => R.dividir ? (R.partes[i].valor || 0) : R.valor;
+/** Verba diretor: o valor não pode passar do que está alocado no plano da Unidade Farid. */
+function checarVerba() {
+  document.querySelectorAll('[data-verba]').forEach(el => {
+    const i = +el.dataset.verba, v = R.partes[i].valorVerba || 0, max = valorDaParte(i), msg = $('#verbaMsg' + i), passou = v > max, nome = planoNome(R.partes[i].planoId);
+    el.setAttribute('aria-invalid', passou); msg.className = 'verba-msg' + (passou ? ' erro' : '');
+    msg.textContent = passou ? `Passou do valor em ${nome} (${brl(max)}). Diminua para até ${brl(max)}.` : `Até ${brl(max)}: o valor em ${nome}.`;
+  });
+}
+const txtParc = () => R.parcelas === 1 ? 'À vista' : R.parcelas + '× de ' + brl(Math.round(R.valor / R.parcelas));
+function atualizarResto() {
+  const pt = $('#parcTxt'); if (pt) pt.textContent = txtParc(); checarVerba();
+  if (!R.dividir) return; const r = $('.resto'), resto = R.valor - somaPartes(); if (!r) return;
+  r.className = 'resto ' + (resto === 0 ? 'ok' : resto < 0 ? 'neg' : '');
+  r.querySelector('span').textContent = resto === 0 ? 'Distribuído ✓' : resto > 0 ? 'Falta distribuir ' + brl(resto) : 'Passou do total em ' + brl(-resto);
+  const aj = $('#ajusta'); if (aj) aj.hidden = resto === 0;
+}
+const recentes = () => { const c = {}; vista().lanc.filter(l => l.dono === eu()).slice(0, 80).forEach(l => l.partes.forEach(p => { if (planoPorId(p.planoId) && planoPorId(p.planoId).ativo) c[p.planoId] = (c[p.planoId] || 0) + 1; })); return Object.entries(c).sort((a, b) => b[1] - a[1]).slice(0, 5).map(x => x[0]); };
+function itensPlanos(incluir) {
+  return planos().filter(p => p.ativo || p.id === incluir).map(p => ({ v: p.id, t: p.nome, tag: extrasDe(p.id).viagem ? 'reembolsável' : p.tipo === 'receita' ? 'receita' : '' }))
+    .sort((a, b) => a.t.localeCompare(b.t, 'pt-BR'));
+}
+const itensLista = (k, atual, ordenar) => { const l = lista(k).filter(x => x.ativo || x.id === atual).map(x => ({ v: x.id, t: x.valor })); return ordenar ? l.sort((a, b) => a.t.localeCompare(b.t, 'pt-BR')) : l; };
+
+async function salvar() {
+  const erro = m => { $('#erro').textContent = m; };
+  if (!R.valor) return erro('Informe o valor.');
+  if (!R.desc.trim()) return erro('Informe a descrição.');
+  if (R.partes.some(p => !p.planoId)) return erro(R.dividir ? 'Escolha o plano de cada parte.' : 'Escolha o plano de contas.');
+  if (new Set(R.partes.map(p => p.planoId)).size !== R.partes.length) return erro('Cada parte precisa de um plano diferente.');
+  if (R.dividir && R.partes.some(p => !p.valor)) return erro('Informe o valor de cada parte.');
+  if (R.dividir && somaPartes() !== R.valor) return erro('A soma das partes precisa fechar o total de ' + brl(R.valor) + '.');
+  const vb = R.partes.findIndex((p, i) => extrasDe(p.planoId).farid && p.verba && (!p.valorVerba || p.valorVerba > valorDaParte(i)));
+  if (vb >= 0) { const p = R.partes[vb]; return erro(!p.valorVerba ? 'Informe o valor da verba diretor.' : `A verba diretor (${brl(p.valorVerba)}) não pode passar do valor em ${planoNome(p.planoId)} (${brl(valorDaParte(vb))}).`); }
+  if (!R.formaId) return erro('Escolha a forma de pagamento.');
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(R.data)) return erro('Informe a data e a hora.');
+  const id = R.id || uuid();
+  const partes = (R.dividir ? R.partes : [Object.assign({}, R.partes[0], { valor: R.valor })]).map(p => {
+    const ex = extrasDe(p.planoId);
+    return { planoId: p.planoId, valor: p.valor, viagemId: ex.viagem ? p.viagemId : '', unidadeId: ex.farid ? p.unidadeId : '', verba: ex.farid && p.verba, valorVerba: ex.farid && p.verba ? p.valorVerba : 0, fazendaId: ex.fazenda ? p.fazendaId : '' };
+  });
+  const dados = { id, data: R.data, valor: R.valor, desc: R.desc.trim(), estabId: R.estabId, formaId: R.formaId, parcelas: ehCredito(formaNome(R.formaId)) ? R.parcelas : 1, obs: R.obs.trim(), partes };
+  if (R.foto) dados.foto = R.foto; else if (R.tirarFoto) dados.tirarFoto = true;
+  // versão: a que o painel tinha quando a edição começou; se o lançamento ainda está na fila, a que o painel devolver
+  const naFila = ST.fila.some(o => o.tipo === 'salvar' && o.dados.id === id);
+  const op = { tipo: 'salvar', dados, miniatura: R.miniatura || '' };
+  if (R.id && naFila) op.seguir = true; else if (R.id && R.versao) dados.versao = R.versao;
+  ST.recusados = ST.recusados.filter(x => x.dados.id !== id);
+  const editando = !!R.id, semNet = !ST.online || !tokenValido();
+  R = novoRascunho(); await guardar('rascunho', 'recusados');
+  animSalvo(semNet, editando);
+  await enfileirar(op);
+}
+function animSalvo(off, ed) {
+  const teste = ST.dados && ST.dados.modoTeste;
+  const el = document.createElement('div'); el.className = 'salvo'; el.setAttribute('role', 'status');
+  el.innerHTML = `<div class="c"><svg viewBox="0 0 120 90" aria-hidden="true">
+    <rect x="22" y="34" width="76" height="50" rx="10" fill="${off ? '#FFF3DF' : '#E7F5EC'}" stroke="${off ? '#A86200' : '#1E7F4F'}" stroke-width="2"/>
+    <g class="moeda"><rect x="42" y="18" width="36" height="20" rx="4" fill="#E9B23A" stroke="#8A5506"/></g>
+    <g class="moeda m2"><rect x="36" y="4" width="36" height="20" rx="4" fill="#F6D06A" stroke="#8A5506"/></g>
+    <g class="okc"><circle cx="96" cy="30" r="13" fill="${off ? '#A86200' : '#1E7F4F'}"/>${off ? '<path d="M96 23v8M96 35v1" stroke="#fff" stroke-width="3" stroke-linecap="round"/>' : '<path d="M90 30l4 4 8-8" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>'}</g></svg>
+    <b>${off ? 'Guardado no celular' : ed ? 'Alterações salvas' : 'Lançamento salvo'}</b><span>${off ? 'Será enviado sozinho quando a conexão voltar.' : teste ? 'Enviando para o painel (modo teste: fora da conciliação).' : 'Enviando para o painel.'}</span></div>`;
+  $('#app').appendChild(el); setTimeout(() => el.remove(), reduz() ? 900 : 1700);
+}
+
+/* ---------- lista e consulta ---------- */
+const mesesDe = ls => [...new Set(ls.map(l => l.data.slice(0, 7)).concat([hojeISO().slice(0, 7)]))].sort().reverse();
+function filtrados(ls) {
+  const F = ST.filtro, q = F.q.trim().toLowerCase();
+  return ls.filter(l => l.data.slice(0, 7) === F.mes && (F.quem === 'todos' || l.dono === eu()) && (!F.plano || l.partes.some(p => p.planoId === F.plano)) && (!F.forma || l.formaId === F.forma)
+    && (!q || [l.desc, nomeOpcao('estabelecimento', l.estabId), l.partes.map(p => planoNome(p.planoId) || p.plano).join(' '), l.obs, formaNome(l.formaId)].join(' ').toLowerCase().includes(q)))
+    .sort((a, b) => b.data.localeCompare(a.data));
+}
+const valorFiltrado = l => ST.filtro.plano ? l.partes.filter(p => p.planoId === ST.filtro.plano).reduce((a, p) => a + p.valor, 0) : l.valor;
+const etiqueta = l => l.status === 'fila' ? '<span class="st fila">Aguardando envio</span>' : l.status === 'erro' ? '<span class="st erro">Não aceito</span>' : l.status === 'ok' ? '<span class="st ok">Na fatura ✓</span>' : '<span class="st esp">Aguardando fatura</span>';
+function telaLista() {
+  const F = ST.filtro, V = vista(), meses = mesesDe(V.lanc);
+  if (!meses.includes(F.mes)) F.mes = meses[0];
+  const ls = filtrados(V.lanc), tot = ls.reduce((a, l) => a + valorFiltrado(l), 0), recus = V.lanc.filter(l => l.status === 'erro');
+  const porDia = {}; ls.forEach(l => { (porDia[l.data.slice(0, 10)] = porDia[l.data.slice(0, 10)] || []).push(l); });
+  const nomeDia = d => new Date(d + 'T12:00').toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit' }).replace('.', '');
+  const fNome = formaNome(F.forma);
+  $('#corpo').innerHTML = `
+  ${recus.length ? `<div class="faixa erro" role="alert"><span><b>${recus.length} lançamento${recus.length === 1 ? '' : 's'} não aceito${recus.length === 1 ? '' : 's'} pelo painel.</b> Toque para corrigir.</span><button type="button" data-ver="${esc(recus[0].id)}">Ver</button></div>` : ''}
+  <div class="filtros">
+    <div class="meses" role="group" aria-label="Mês">${meses.map(m => `<button type="button" class="chip" data-mes="${m}" aria-pressed="${m === F.mes}">${MES[+m.slice(5) - 1].replace(/^./, c => c.toUpperCase())} ${m.slice(0, 4)}</button>`).join('')}</div>
+    <input type="search" class="busca" id="q" placeholder="Buscar descrição, plano ou estabelecimento" value="${esc(F.q)}" aria-label="Buscar">
+    <div class="chips">
+      <div class="seg" style="flex:1"><button type="button" data-quem="todos" aria-pressed="${F.quem === 'todos'}">Todos</button><button type="button" data-quem="meus" aria-pressed="${F.quem === 'meus'}">Meus</button></div>
+      <button type="button" class="chip" id="fPlano" aria-pressed="${!!F.plano}">${esc(planoNome(F.plano) || 'Plano')} ▾</button>
+      <button type="button" class="chip" id="fForma" aria-pressed="${!!F.forma}">${esc(fNome ? fNome.replace('Cartão de Crédito ', '').replace(/[()]/g, '') : 'Pagamento')} ▾</button>
+    </div>
+  </div>
+  <div class="resumo"><div><small>${ls.length} lançamento${ls.length === 1 ? '' : 's'}${F.plano ? ' · só a parte de ' + esc(planoNome(F.plano)) : ''}</small><b>${brl(tot)}</b></div><small>${ST.online ? 'Lançamentos do app' : 'Cópia salva no celular'}</small></div>
+  ${Object.keys(porDia).length ? Object.entries(porDia).map(([d, l]) => `<div class="dia"><span>${nomeDia(d)}</span><span>${brl(l.reduce((a, x) => a + valorFiltrado(x), 0))}</span></div>${l.map(x => `
+    <button type="button" class="item" data-ver="${esc(x.id)}"><span class="av ${x.dono === eu() ? '' : 'g'}" title="${esc(x.usuario)}">${esc((x.usuario || '?')[0])}</span>
+      <span class="txt"><b>${esc(x.desc)}</b><small>${esc(x.partes.map(p => planoNome(p.planoId) || p.plano).join(' + '))}${x.partes.length > 1 ? ' · dividida' : ''}</small><small>${esc(formaNome(x.formaId))}${x.parcelas > 1 ? ' · ' + x.parcelas + '×' : ''}</small></span>
+      <span class="dir"><b>${brl(valorFiltrado(x))}</b><br>${etiqueta(x)}</span></button>`).join('')}`).join('')
+    : '<div class="vazio">Nenhum lançamento com esses filtros.</div>'}`;
+  document.querySelectorAll('[data-mes]').forEach(b => b.onclick = () => { F.mes = b.dataset.mes; tela(); });
+  document.querySelectorAll('[data-quem]').forEach(b => b.onclick = () => { F.quem = b.dataset.quem; tela(); });
+  $('#q').oninput = e => { F.q = e.target.value; tela(); const q = $('#q'); q.focus(); q.setSelectionRange(q.value.length, q.value.length); };
+  $('#fPlano').onclick = async () => { const v = await escolher('Filtrar por plano', itensPlanos(F.plano), F.plano, { limpar: 'Todos os planos' }); if (v == null) return; F.plano = v; tela(); };
+  $('#fForma').onclick = async () => { const v = await escolher('Filtrar por pagamento', itensLista('forma', F.forma), F.forma, { limpar: 'Todas as formas' }); if (v == null) return; F.forma = v; tela(); };
+  document.querySelectorAll('[data-ver]').forEach(b => b.onclick = () => detalhe(vista().lanc.find(l => l.id === b.dataset.ver)));
+}
+const fotos = {};   // fotos já baixadas nesta abertura
+function detalhe(l) {
+  if (!l) return;
+  const meu = l.dono === eu(), d = new Date(l.data);
+  const extras = p => [p.viagemId && ['Despesa de viagem', nomeOpcao('tipo_viagem', p.viagemId)], p.unidadeId && ['Unidade Farid', nomeOpcao('unidade_farid', p.unidadeId)],
+    p.unidadeId && ['Verba diretor', p.verba ? 'Sim · ' + brl(p.valorVerba) : 'Não'], p.fazendaId && ['Tipo fazenda', nomeOpcao('tipo_fazenda', p.fazendaId)]].filter(Boolean).map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join('');
+  const tag = l.status === 'fila' ? '<span class="tag" style="background:var(--warn-bg);color:var(--warn)">Aguardando envio · guardado no celular</span>'
+    : l.status === 'erro' ? `<div class="faixa erro" role="alert"><span><b>Não aceito pelo painel:</b> ${esc(l.erro)}</span></div>`
+      : l.status === 'ok' ? '<span class="tag" style="background:var(--ok-bg);color:var(--ok)">Encontrado na fatura/extrato</span>' : '<span class="tag" style="background:var(--soft);color:var(--muted)">Aguardando a fatura/extrato chegar no painel</span>';
+  const f = abrirFolha(`<div class="folha-cab"><h3>${esc(l.desc)}<span>${brl(l.valor)}</span></h3></div><div class="folha-corpo det">
+    ${tag}
+    <dl><dt>Data</dt><dd>${d.toLocaleDateString('pt-BR')} ${d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</dd><dt>Lançado por</dt><dd>${esc(l.usuario)}</dd>
+      <dt>Pagamento</dt><dd>${esc(formaNome(l.formaId))}${l.parcelas > 1 ? ' · ' + l.parcelas + '×' : ''}</dd>${l.estabId ? `<dt>Estabelecimento</dt><dd>${esc(nomeOpcao('estabelecimento', l.estabId))}</dd>` : ''}${l.obs ? `<dt>Observação</dt><dd>${esc(l.obs)}</dd>` : ''}</dl>
+    <div class="cartao" style="padding:12px"><span class="rot">${l.partes.length > 1 ? 'Dividida em ' + l.partes.length + ' planos' : 'Plano de contas'}</span>
+      ${l.partes.map(p => `<dl><dt style="color:var(--navy);font-weight:800">${esc(planoNome(p.planoId) || p.plano)}</dt><dd>${brl(p.valor)}</dd>${extras(p)}</dl>`).join('<hr style="border:0;border-top:1px dashed var(--line);margin:4px 0">')}</div>
+    <div id="fotoDet">${l.miniatura ? `<img src="${l.miniatura}" alt="Comprovante" style="max-width:100%;border-radius:12px;border:1px solid var(--line)">` : l.fotoId ? (fotos[l.id] ? `<img src="${fotos[l.id]}" alt="Comprovante" style="max-width:100%;border-radius:12px;border:1px solid var(--line)">` : '<button type="button" class="btn sec" id="verFoto" style="width:100%">Ver comprovante</button>') : ''}</div>
+    ${meu ? `<div class="acoes"><button type="button" class="btn sec" id="ed">${l.status === 'erro' ? 'Corrigir' : 'Editar'}</button><button type="button" class="btn neg" id="ex">${l.status === 'erro' ? 'Descartar' : 'Excluir'}</button></div>` : `<span class="mini" style="text-align:center">Lançado por ${esc(l.usuario)}: só quem lançou pode alterar.</span>`}
+  </div>`);
+  const vf = f.querySelector('#verFoto');
+  if (vf) vf.onclick = async () => {
+    vf.textContent = 'Carregando…'; vf.disabled = true;
+    try { const r = await api('foto', { id: l.id }); fotos[l.id] = r.foto; f.querySelector('#fotoDet').innerHTML = `<img src="${r.foto}" alt="Comprovante" style="max-width:100%;border-radius:12px;border:1px solid var(--line)">`; }
+    catch (e) { vf.disabled = false; vf.textContent = e.rede ? 'Sem internet: tente depois' : e.login ? 'Entre de novo para ver' : e.message; }
+  };
+  if (!meu) return;
+  f.querySelector('#ed').onclick = () => {
+    fecharFolha();
+    R = { id: l.id, versao: l.status === 'fila' || l.status === 'erro' ? (ST.dados.lancamentos.find(x => x.id === l.id) || {}).versao || null : l.versao, data: l.data, valor: l.valor, desc: l.desc, estabId: l.estabId, formaId: l.formaId, parcelas: l.parcelas, obs: l.obs,
+      foto: null, miniatura: l.miniatura || null, fotoId: l.fotoId || '', tirarFoto: false, dividir: l.partes.length > 1, partes: l.partes.map(p => Object.assign(parteVazia(), p)) };
+    // foto nova ainda na fila: continua indo junto
+    const op = ST.fila.concat(ST.recusados).filter(o => o.tipo === 'salvar' && o.dados.id === l.id).pop(); if (op && op.dados.foto) R.foto = op.dados.foto;
+    salvaRascunho(); ST.aba = 'novo'; tela(); $('#corpo').scrollTop = 0;
+  };
+  f.querySelector('#ex').onclick = async () => {
+    const b = f.querySelector('#ex'); if (!b.dataset.c) { b.dataset.c = 1; b.textContent = l.status === 'erro' ? 'Toque de novo para descartar' : 'Toque de novo para excluir'; return; }
+    fecharFolha();
+    await excluir(l);
+  };
+}
+async function excluir(l) {
+  const noPainel = ((ST.dados && ST.dados.lancamentos) || []).some(x => x.id === l.id), tentou = ST.fila.some(o => o.tipo === 'salvar' && o.dados.id === l.id && o.tentou);
+  ST.recusados = ST.recusados.filter(x => x.dados.id !== l.id);
+  // nunca chegou ao painel: só tira do celular
+  ST.fila = ST.fila.filter(o => !(o.tipo === 'salvar' && o.dados.id === l.id && !o.tentou));
+  await guardar('fila', 'recusados');
+  if (noPainel || tentou) { aviso('Lançamento excluído'); await enfileirar({ tipo: 'excluir', dados: { id: l.id } }); }
+  else { aviso(l.status === 'erro' ? 'Lançamento descartado' : 'Lançamento excluído'); tela(); }
+}
+
+/* ---------- Personal: aulas feitas e compra de aulas ---------- */
+function resumoLocal(P, id) {
+  const ls = P.lanc.filter(l => l.localId === id && !l.cancelado);
+  const comp = ls.filter(l => l.tipo === 'compra').reduce((a, l) => a + l.qtd, 0), feitas = ls.filter(l => l.tipo === 'aula').reduce((a, l) => a + l.qtd, 0);
+  const ult = ls.filter(l => l.tipo === 'aula').map(l => l.data).sort().pop() || ''; return { comp, feitas, saldo: comp - feitas, ult };
+}
+function telaPers() {
+  const P = vista().pers, mes = hojeISO().slice(0, 7), ano = mes.slice(0, 4), locais = P.locais.filter(l => l.ativo);
+  const ativos = P.lanc.filter(l => !l.cancelado && l.tipo === 'aula');
+  const disp = locais.reduce((a, l) => a + resumoLocal(P, l.id).saldo, 0), noMes = ativos.filter(l => l.data.slice(0, 7) === mes).reduce((a, l) => a + l.qtd, 0), noAno = ativos.filter(l => l.data.slice(0, 4) === ano).reduce((a, l) => a + l.qtd, 0);
+  const sit = s => s < 0 ? `<span class="st" style="background:var(--neg-bg);color:var(--neg)">Devendo ${-s}</span>` : s === 0 ? '<span class="st fila">Sem saldo</span>' : s <= 2 ? '<span class="st fila">Acabando</span>' : '<span class="st ok">Em dia</span>';
+  const hist = P.lanc.slice().sort((a, b) => b.data.localeCompare(a.data) || String(b.criadoEm).localeCompare(String(a.criadoEm))).slice(0, 15);
+  $('#corpo').innerHTML = `
+  <div class="resumo"><div><small>Aulas disponíveis</small><b>${disp}</b></div><div style="text-align:right"><small>No mês · no ano</small><b style="font-size:17px">${noMes} · ${noAno}</b></div></div>
+  ${locais.length ? locais.map(l => { const r = resumoLocal(P, l.id); return `<div class="cartao" style="margin-top:12px">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px"><div><b style="font-size:16px;color:var(--navy)">${esc(l.nome)}</b><div class="mini">${r.comp} compradas · ${r.feitas} feitas${r.ult ? ' · última ' + dataBR(r.ult) : ''}</div></div>
+      <div style="text-align:right"><b style="font-family:var(--f-display);font-size:26px;color:${r.saldo < 0 ? 'var(--neg)' : 'var(--navy)'}">${r.saldo}</b><div>${sit(r.saldo)}</div></div></div>
+    <div class="linha2"><button type="button" class="btn sec" data-paula="${esc(l.id)}">− Aula feita</button><button type="button" class="btn ouro" data-pcompra="${esc(l.id)}">+ Comprar</button></div></div>`; }).join('')
+    : '<div class="vazio">Nenhum local cadastrado. Cadastre os locais no painel (Acompanhamento Personal).</div>'}
+  ${hist.length ? '<div class="dia" style="margin-top:18px"><span>Últimos lançamentos</span></div>' : ''}
+  ${hist.map(h => { const loc = (P.locais.find(x => x.id === h.localId) || {}).nome || ''; const canc = h.cancelado;
+    return `<div class="item" style="cursor:default${canc ? ';opacity:.55' : ''}"><span class="av" style="background:${h.tipo === 'compra' ? 'var(--gold-soft)' : 'var(--soft)'}">${h.tipo === 'compra' ? '+' : '−'}</span>
+      <span class="txt"><b style="${canc ? 'text-decoration:line-through' : ''}">${h.tipo === 'compra' ? `Compra de ${h.qtd} aula${h.qtd === 1 ? '' : 's'}` : `${h.qtd} aula${h.qtd === 1 ? '' : 's'} feita${h.qtd === 1 ? '' : 's'}`}</b><small>${esc(loc)} · ${dataBR(h.data)}</small></span>
+      <span class="dir">${h.fila ? '<span class="st fila">Aguardando envio</span>' : canc ? '<span class="st esp">Cancelado</span>' : `<button type="button" class="chip" data-pcanc="${esc(h.id)}" style="font-size:12px">Cancelar</button>`}</span></div>`; }).join('')}
+  <p class="mini" style="text-align:center;margin-top:10px">Lançamento errado é cancelado: sai do saldo e continua no histórico.</p>`;
+  document.querySelectorAll('[data-paula]').forEach(b => b.onclick = () => formPers(b.dataset.paula, 'aula'));
+  document.querySelectorAll('[data-pcompra]').forEach(b => b.onclick = () => formPers(b.dataset.pcompra, 'compra'));
+  document.querySelectorAll('[data-pcanc]').forEach(b => b.onclick = async () => {
+    if (!b.dataset.c) { b.dataset.c = 1; b.textContent = 'Confirmar?'; b.style.background = 'var(--neg-bg)'; b.style.color = 'var(--neg)'; return; }
+    const id = b.dataset.pcanc;
+    // ainda não enviado: só tira da fila
+    const i = ST.fila.findIndex(o => o.tipo === 'personal' && !o.dados.acao && idPers(o.dados.idApp) === id && !o.tentou);
+    if (i >= 0) { ST.fila.splice(i, 1); await guardar('fila'); aviso('Lançamento cancelado'); tela(); return; }
+    aviso('Lançamento cancelado e mantido no histórico');
+    await enfileirar({ tipo: 'personal', dados: { acao: 'cancelar', id } });
+  });
+}
+function formPers(localId, tipo) {
+  const P = vista().pers, loc = P.locais.find(l => l.id === localId), r = resumoLocal(P, localId); let qtd = tipo === 'compra' ? 10 : 1;
+  const f = abrirFolha(`<div class="folha-cab"><h3>${tipo === 'compra' ? 'Comprar aulas' : 'Aula feita'}<span class="mini">${esc(loc.nome)}</span></h3></div>
+    <div class="folha-corpo det">
+      <span class="mini">Saldo agora: <b>${r.saldo}</b> aula${Math.abs(r.saldo) === 1 ? '' : 's'}</span>
+      <div class="campo"><label class="rot" for="pdata">Data</label><input type="date" id="pdata" class="busca" value="${hojeISO()}" max="${hojeISO()}"></div>
+      <div class="campo"><span class="rot">Quantidade</span><div class="passo"><button type="button" id="pqMenos" aria-label="Menos">−</button><b id="pqtd">${qtd}</b><button type="button" id="pqMais" aria-label="Mais">+</button></div>
+        ${tipo === 'compra' ? `<div class="chips">${[5, 10, 12, 20].map(n => `<button type="button" class="chip" data-pn="${n}">${n} aulas</button>`).join('')}</div>` : ''}</div>
+      <span class="mini" id="pdepois"></span>
+      <span class="mini" id="perro" role="alert" style="color:var(--neg);font-weight:700"></span>
+      <button type="button" class="btn pri" id="pok">${tipo === 'compra' ? 'Registrar compra' : 'Registrar aula'}</button>
+    </div>`);
+  const depois = () => { const s = r.saldo + (tipo === 'compra' ? qtd : -qtd); f.querySelector('#pdepois').innerHTML = `Saldo depois: <b style="color:${s < 0 ? 'var(--neg)' : 'var(--navy)'}">${s}</b>${s < 0 ? ' · vai ficar devendo' : ''}`; f.querySelector('#pqtd').textContent = qtd; };
+  depois();
+  f.querySelector('#pqMenos').onclick = () => { qtd = Math.max(1, qtd - 1); depois(); };
+  f.querySelector('#pqMais').onclick = () => { qtd = Math.min(200, qtd + 1); depois(); };
+  f.querySelectorAll('[data-pn]').forEach(b => b.onclick = () => { qtd = +b.dataset.pn; depois(); });
+  const ok = f.querySelector('#pok');
+  ok.onclick = async () => {
+    const data = f.querySelector('#pdata').value;
+    if (!data || data > hojeISO()) return f.querySelector('#perro').textContent = 'A data não pode ser depois de hoje.';
+    if (tipo === 'aula' && r.saldo - qtd < 0 && !ok.dataset.c) { ok.dataset.c = 1; ok.textContent = 'Sem saldo: registrar mesmo assim'; ok.style.background = 'var(--warn)'; f.querySelector('#perro').textContent = `${loc.nome} ficará devendo ${qtd - r.saldo} aula${qtd - r.saldo === 1 ? '' : 's'}.`; return; }
+    folhaFim = null; fecharFolha(true);
+    animSalvoPers(tipo, qtd, loc.nome, !ST.online || !tokenValido());
+    await enfileirar({ tipo: 'personal', dados: { idApp: uuid(), localId, tipo, qtd, data } });
+  };
+}
+function animSalvoPers(tipo, qtd, local, off) {
+  const el = document.createElement('div'); el.className = 'salvo'; el.setAttribute('role', 'status');
+  el.innerHTML = `<div class="c"><svg viewBox="0 0 120 90" aria-hidden="true">
+    <g class="moeda"><rect x="20" y="40" width="14" height="30" rx="3" fill="#0B1F4D"/><rect x="86" y="40" width="14" height="30" rx="3" fill="#0B1F4D"/><rect x="34" y="51" width="52" height="8" rx="4" fill="#C9962E"/><rect x="12" y="46" width="8" height="18" rx="2" fill="#173172"/><rect x="100" y="46" width="8" height="18" rx="2" fill="#173172"/></g>
+    <g class="okc"><circle cx="96" cy="24" r="13" fill="${off ? '#A86200' : '#1E7F4F'}"/>${off ? '<path d="M96 17v8M96 29v1" stroke="#fff" stroke-width="3" stroke-linecap="round"/>' : '<path d="M90 24l4 4 8-8" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>'}</g></svg>
+    <b>${tipo === 'compra' ? `${qtd} aula${qtd === 1 ? '' : 's'} comprada${qtd === 1 ? '' : 's'}` : 'Aula registrada'}</b><span>${esc(local)}${off ? ' · guardado no celular, sobe quando a internet voltar' : ' · enviando para o painel'}</span></div>`;
+  $('#app').appendChild(el); setTimeout(() => el.remove(), reduz() ? 900 : 1600);
+}
+
+/* ---------- conta ---------- */
+function telaConta() {
+  const n = ST.fila.length, u = ST.dados.usuario || {};
+  $('#corpo').innerHTML = `${faixaTeste()}<div class="cartao"><span class="rot">Conectado como</span><b style="font-size:17px;color:var(--navy)">${esc(u.nome)}</b><span class="mini">${esc(eu())}</span></div>
+  <div class="cartao"><span class="rot">Sincronização</span><span>${n ? `<b>${n}</b> envio${n === 1 ? '' : 's'} guardado${n === 1 ? '' : 's'} no celular${ST.online ? '' : ', aguardando internet'}.` : 'Tudo enviado para o painel.'}</span>
+    ${ST.recusados.length ? `<span style="color:var(--neg);font-weight:700">${ST.recusados.length} não aceito${ST.recusados.length === 1 ? '' : 's'} pelo painel: veja em Lançamentos.</span>` : ''}
+    <span class="mini">Atualizado em ${esc(String(ST.dados.agora || '').replace(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}:\d{2}).*/, '$3/$2/$1 às $4'))}. Planos de contas e listas vêm do painel: o que mudar lá aparece aqui na próxima atualização.</span>
+    <button type="button" class="btn sec" id="atualizarJa" ${ST.online ? '' : 'disabled'}>Atualizar agora</button></div>
+  <div class="cartao"><span class="rot">Instalar no celular</span><span class="mini">No Android: menu do Chrome → Instalar app. No iPhone (Safari): Compartilhar → Adicionar à Tela de Início.</span></div>
+  <button type="button" class="btn sec" id="sair" style="width:100%;margin-top:12px">Sair</button>
+  <p class="mini" style="text-align:center">App versão ${APP_VERSAO}</p>`;
+  $('#atualizarJa').onclick = async () => { if (!tokenValido()) return folhaLogin(); await enviarFila(); await atualizar(); aviso('Atualizado'); };
+  $('#sair').onclick = async () => {
+    const b = $('#sair');
+    if (ST.fila.length) { aviso(`Ainda há ${ST.fila.length} envio(s) guardado(s) no celular. Conecte à internet para enviar antes de sair.`, true); return; }
+    if (!b.dataset.c) { b.dataset.c = 1; b.textContent = 'Toque de novo para sair'; return; }
+    await sairDeVez('');
+  };
+}
+
+/* ---------- listas de escolha (folha que sobe de baixo) ---------- */
+let folhaFim = null;
+function abrirFolha(html) {
+  fecharFolha(true);
+  const v = document.createElement('div'); v.className = 'veu'; const f = document.createElement('div'); f.className = 'folha'; f.setAttribute('role', 'dialog'); f.setAttribute('aria-modal', 'true'); f.innerHTML = html;
+  $('#app').append(v, f); requestAnimationFrame(() => { v.classList.add('on'); f.classList.add('on'); }); v.onclick = () => fecharFolha();
+  f.tabIndex = -1; setTimeout(() => { if (!f.contains(document.activeElement)) f.focus({ preventScroll: true }); }, 280);
+  return f;
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('.folha')) { e.preventDefault(); fecharFolha(); } });
+function fecharFolha(ja) {
+  const f = $('.folha'), v = $('.veu'); if (!f) return; if (folhaFim) { const r = folhaFim; folhaFim = null; r(null); }
+  if (ja || reduz()) { f.remove(); v && v.remove(); return; } f.classList.remove('on'); v && v.classList.remove('on'); setTimeout(() => { f.remove(); v && v.remove(); }, 260);
+}
+/** itens: [{v: id, t: texto, tag}] · devolve o id escolhido ('' = limpar; null = fechou sem escolher). */
+function escolher(titulo, itens, atual, op = {}) {
+  return new Promise(res => {
+    const f = abrirFolha(`<div class="folha-cab"><h3>${esc(titulo)}</h3>${itens.length > 8 ? '<input type="search" class="busca" id="fq" placeholder="Pesquisar" aria-label="Pesquisar">' : ''}</div><div class="folha-corpo" role="listbox" aria-label="${esc(titulo)}"></div>`);
+    folhaFim = res;
+    const corpo = f.querySelector('.folha-corpo'), q = f.querySelector('#fq'), porId = {}; itens.forEach(x => porId[x.v] = x);
+    const linha = x => `<button type="button" class="opc" data-v="${esc(x.v)}" role="option" aria-selected="${x.v === atual}">${esc(x.t)}${x.tag ? `<small>${esc(x.tag)}</small>` : ''}</button>`;
+    const pinta = () => {
+      const t = (q && q.value || '').trim().toLowerCase(), vis = itens.filter(x => !t || x.t.toLowerCase().includes(t)), rec = (op.recentes || []).filter(v => !t && porId[v]).map(v => porId[v]);
+      corpo.innerHTML = (op.limpar && !t ? `<button type="button" class="opc" data-v="" role="option" aria-selected="${!atual}"><i style="font-style:normal;color:var(--muted)">${esc(op.limpar)}</i></button>` : '')
+        + (rec.length ? `<div class="grupo">Mais usados por você</div>${rec.map(linha).join('')}<div class="grupo">Todos</div>` : '')
+        + (vis.map(linha).join('') || `<div class="vazio">Nada com “${esc(t)}”.</div>`);
+      corpo.querySelectorAll('[data-v]').forEach(b => b.onclick = () => { folhaFim = null; res(b.dataset.v); fecharFolha(); });
+    };
+    pinta();
+    if (q) { q.oninput = pinta; setTimeout(() => q.focus({ preventScroll: true }), 280); }
+    else { const a = corpo.querySelector('[aria-selected="true"]') || corpo.querySelector('[data-v]'); a && setTimeout(() => a.focus(), 280); }
+  });
+}
+function aviso(msg, alerta) {
+  const a = $('#aviso'); a.className = 'aviso on' + (alerta ? ' off' : '');
+  a.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true">${alerta ? '<path d="M12 8v5M12 16v1"/><circle cx="12" cy="12" r="9"/>' : '<path d="M5 12l5 5 9-10"/>'}</svg><span>${esc(msg)}</span>`;
+  clearTimeout(aviso.t); aviso.t = setTimeout(() => a.classList.remove('on'), alerta ? 4500 : 2600);
+}
+
+/* ================================================================== */
+/* Início                                                               */
+document.querySelectorAll('[data-aba]').forEach(b => b.onclick = () => { ST.aba = b.dataset.aba; fecharFolha(true); tela(); $('#corpo').scrollTop = 0; });
+window.addEventListener('online', () => { ST.online = true; tela(); if (!tokenValido()) renovarLogin(); enviarFila(); atualizar(true); });
+window.addEventListener('offline', () => { ST.online = false; tela(); });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && ST.sessao) { if (ST.online && !tokenValido()) renovarLogin(); enviarFila(); atualizar(true); } });
+setInterval(() => { if (ST.fila.length && ST.online && !enviando) enviarFila(); }, 30000);
+
+(async function iniciar() {
+  const [sessao, dados, fila, recusados, rascunho] = await Promise.all(['sessao', 'dados', 'fila', 'recusados', 'rascunho'].map(k => BD.get(k)));
+  ST.sessao = sessao || null; ST.dados = dados || null; ST.fila = fila || []; ST.recusados = recusados || []; R = rascunho || null;
+  ST.fila.forEach(o => { if (o.tentou === undefined) o.tentou = false; });
+  if (ST.sessao && !ST.dados && ST.online && tokenValido()) $('#corpo').innerHTML = '<div class="carregando"><i></i></div>';
+  tela();
+  if (gis && ST.sessao && !tokenValido()) renovarLogin();
+  if (tokenValido()) { await enviarFila(); if (!ST.fila.length) atualizar(true); }
+  if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+    // versão nova do app publicada: o celular troca sozinho (o rascunho e a fila ficam guardados)
+    const tinha = !!navigator.serviceWorker.controller; let recarregou = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => { if (!tinha || recarregou) return; recarregou = true; if (!$('.folha') && !enviando) location.reload(); });
+    navigator.serviceWorker.register('sw.js').catch(() => { });
+  }
+})();
