@@ -4,7 +4,7 @@
  * - Login Google: o painel confere o login e a lista de e-mails autorizados (nada disso fica aqui).
  */
 'use strict';
-const APP_VERSAO = '3';
+const APP_VERSAO = '4';
 const CFG = window.HM_CONFIG || {};
 
 /* ================================================================== */
@@ -309,7 +309,11 @@ function telaNovo() {
     ${ehCredito(forma) ? `<div class="campo"><span class="rot">Parcelas</span><div class="passo"><button type="button" id="pmenos" aria-label="Menos parcelas">−</button><b id="parcTxt">${txtParc()}</b><button type="button" id="pmais" aria-label="Mais parcelas">+</button></div></div>` : ''}
     <div class="campo"><span class="rot">Estabelecimento</span><button type="button" class="sel" id="estab" aria-haspopup="dialog"><span class="${R.estabId ? '' : 'vazio'}">${esc(nomeOpcao('estabelecimento', R.estabId) || 'Escolher (opcional)')}</span>${CHEV}</button></div>
     <div class="campo"><label class="rot" for="data">Data e hora</label><input type="datetime-local" id="data" value="${esc(R.data)}"></div>
-    <div class="campo"><span class="rot">Comprovante</span><div class="foto">${foto}<label class="btn sec" for="fotoIn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>${temFoto ? 'Trocar foto' : 'Fotografar ou escolher'}</label>${temFoto ? '<button type="button" class="ic" id="tiraFoto" aria-label="Remover a foto"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg></button>' : ''}<input type="file" id="fotoIn" accept="image/*" hidden></div></div>
+    <div class="campo"><span class="rot">Comprovante</span><div class="foto">${foto}
+      <label class="btn sec" for="fotoCam"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>Câmera</label>
+      <label class="btn sec" for="fotoIn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M21 16l-5-5-8 8"/></svg>Galeria</label>
+      ${temFoto ? '<button type="button" class="ic" id="tiraFoto" aria-label="Remover a foto"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg></button>' : ''}
+      <input type="file" id="fotoCam" accept="image/*" capture="environment" hidden><input type="file" id="fotoIn" accept="image/*" hidden></div></div>
     <div class="campo"><label class="rot" for="obs">Observação</label><textarea id="obs" placeholder="Opcional" maxlength="500">${esc(R.obs)}</textarea></div>
   </div>
   <div style="display:flex;flex-direction:column;gap:8px;margin-top:14px">
@@ -362,7 +366,8 @@ function ligarNovo() {
   $('#estab').onclick = async () => { const v = await escolher('Estabelecimento', itensLista('estabelecimento', R.estabId, true), R.estabId, { limpar: 'Sem estabelecimento' }); if (v == null) return; R.estabId = v; ref(); };
   const pm = $('#pmenos'), pM = $('#pmais');
   if (pm) { pm.onclick = () => { R.parcelas = Math.max(1, R.parcelas - 1); ref(); }; pM.onclick = () => { R.parcelas = Math.min(24, R.parcelas + 1); ref(); }; }
-  $('#fotoIn').onchange = async e => { const f = e.target.files[0]; if (!f) return; try { const r = await prepararFoto(f); R.foto = r.foto; R.miniatura = r.mini; R.tirarFoto = false; ref(); } catch (er) { $('#erro').textContent = 'Não consegui abrir essa foto.'; } };
+  const pegaFoto = async e => { const f = e.target.files[0]; if (!f) return; try { const r = await prepararFoto(f); R.foto = r.foto; R.miniatura = r.mini; R.tirarFoto = false; ref(); } catch (er) { $('#erro').textContent = 'Não consegui abrir essa foto.'; } };
+  $('#fotoIn').onchange = pegaFoto; $('#fotoCam').onchange = pegaFoto;
   const tf = $('#tiraFoto'); if (tf) tf.onclick = () => { R.foto = null; R.miniatura = null; R.tirarFoto = !!R.fotoId; ref(); };
   const ce = $('#cancelarEd'); if (ce) ce.onclick = () => { R = novoRascunho(); salvaRascunho(); ST.aba = 'lista'; tela(); };
   $('#salvar').onclick = salvar;
