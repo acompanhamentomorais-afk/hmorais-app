@@ -4,7 +4,7 @@
  * - Login Google: o painel confere o login e a lista de e-mails autorizados (nada disso fica aqui).
  */
 'use strict';
-const APP_VERSAO = '5';
+const APP_VERSAO = '6';
 const CFG = window.HM_CONFIG || {};
 
 /* ================================================================== */
@@ -106,7 +106,7 @@ async function api(acao, dados) {
 /** Busca tudo de novo no painel (ao abrir, ao voltar para o app e depois de enviar a fila). */
 async function atualizar(silencioso) {
   if (atualizando || !ST.online || !tokenValido()) return;
-  atualizando = true;
+  atualizando = true; if (!ST.dados) tela();
   try {
     const d = await api('inicio');
     ST.dados = d; ST.erroLogin = '';
@@ -120,10 +120,21 @@ async function atualizar(silencioso) {
 }
 
 /** Primeira abertura sem conseguir falar com o painel: mostra o motivo e "Tentar de novo" (em vez de ficar carregando). */
-function erroInicio(msg) {
-  $('#corpo').innerHTML = `<div class="cartao" style="text-align:center;gap:12px"><b style="color:var(--navy);font-size:16px">Não consegui abrir os dados do painel</b>
-    <span class="mini" role="alert">${esc(msg)}</span><button type="button" class="btn pri" id="tentar">Tentar de novo</button></div>`;
-  $('#tentar').onclick = () => { $('#corpo').innerHTML = '<div class="carregando"><i></i></div>'; atualizar(); };
+function erroInicio(msg) { ST.erroInicio = msg; }
+/** Logado, mas ainda sem os dados do painel no celular: mostra o que está acontecendo (nunca fica só girando). */
+function telaSemDados() {
+  const caixa = (tit, txt, botoes) => `<div class="cartao" style="text-align:center;gap:12px"><b style="color:var(--navy);font-size:16px">${tit}</b><span class="mini" role="alert">${txt}</span>${botoes}</div>`;
+  const sair = '<button type="button" class="btn sec" id="semSair">Sair e entrar com outra conta</button>';
+  if (atualizando) $('#corpo').innerHTML = `<div class="carregando" style="gap:14px;display:grid;justify-items:center"><i></i><span class="mini" style="text-align:center">Buscando seus dados no painel…<br>Na primeira vez pode levar até 1 minuto.</span></div>`;
+  else if (!ST.online) $('#corpo').innerHTML = caixa('Sem internet', 'Conecte o celular à internet para carregar os dados pela primeira vez. Depois o app funciona sem internet.', '<button type="button" class="btn pri" id="tentar">Tentar de novo</button>');
+  else if (!tokenValido()) {
+    $('#corpo').innerHTML = caixa('Entre de novo', `O login do Google (${esc(eu())}) vale por uma hora e expirou. Entre de novo para carregar os dados.`, '<div class="gbox" id="gbtn3" style="display:grid;place-items:center;min-height:44px"></div>' + sair);
+    try { google.accounts.id.renderButton($('#gbtn3'), { theme: 'filled_blue', size: 'large', shape: 'pill', text: 'continue_with', locale: 'pt-BR' }); } catch (e) { $('#gbtn3').textContent = 'Carregando o login do Google…'; }
+    renovarLogin();
+  }
+  else $('#corpo').innerHTML = caixa('Não consegui abrir os dados do painel', esc(ST.erroInicio || 'Toque em "Tentar de novo".'), '<button type="button" class="btn pri" id="tentar">Tentar de novo</button>' + sair);
+  const t = $('#tentar'); if (t) t.onclick = () => { ST.erroInicio = ''; atualizar(); };
+  const s = $('#semSair'); if (s) s.onclick = () => { if (ST.fila.length) return aviso(`Há ${ST.fila.length} envio(s) guardado(s) no celular. Entre com ${eu()} para enviar antes de sair.`, true); sairDeVez(''); };
 }
 
 /** Envia a fila, um por vez, na ordem em que foi lançada. */
@@ -190,7 +201,7 @@ window.gisPronto = function () {
   google.accounts.id.initialize({ client_id: CFG.CLIENT_ID, callback: r => entrou(r.credential), auto_select: true, cancel_on_tap_outside: false, itp_support: true, use_fedcm_for_prompt: true });
   gis = true;
   if (!ST.sessao) telaLogin();
-  else if (!tokenValido() && ST.online && (ST.fila.length || ST.sessao)) renovarLogin();
+  else { if (!ST.dados) tela(); if (!tokenValido() && ST.online) renovarLogin(); }
 };
 /** Sessão do Google dura 1 hora: renova sozinho (sem tocar em nada, se o Google deixar). */
 function renovarLogin() {
@@ -252,8 +263,9 @@ function pintaTopo() {
 }
 function tela() {
   pintaTopo();
-  if (!ST.sessao || !ST.dados) { if (!ST.sessao) telaLogin(); return; }
+  if (!ST.sessao) { telaLogin(); return; }
   document.querySelectorAll('.login').forEach(x => x.remove());
+  if (!ST.dados) { telaSemDados(); return; }
   $('#abaPers').hidden = !temPersonal(); if (ST.aba === 'pers' && !temPersonal()) ST.aba = 'novo';
   $('#abaRel').hidden = !temRelatorios(); if (ST.aba === 'rel' && !temRelatorios()) ST.aba = 'novo';
   document.querySelectorAll('[data-aba]').forEach(b => b.setAttribute('aria-current', b.dataset.aba === ST.aba ? 'page' : 'false'));
