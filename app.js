@@ -4,7 +4,7 @@
  * - Login Google: o painel confere o login e a lista de e-mails autorizados (nada disso fica aqui).
  */
 'use strict';
-const APP_VERSAO = '10';
+const APP_VERSAO = '11';
 const CFG = window.HM_CONFIG || {};
 
 /* ================================================================== */
@@ -716,77 +716,162 @@ function folhaPorPlano() {
 const MESC = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
 const temRelatorios = () => !!(ST.dados && ST.dados.relatorios);
 const temRdv = () => !!(ST.dados && ST.dados.rdv);
-/* ---------- RDV Aneethun ES / BH e UniTudo (modelo clássico; administradores) ---------- */
-const RV = { mes: '' };
-function htmlRdv() {
-  const R = ST.dados.rdv, hoje = hojeISO().slice(0, 7);
-  const meses = [...new Set(R.despesas.map(x => x.data.slice(0, 7)).concat([hoje]))].sort().reverse().slice(0, 18);
-  if (!meses.includes(RV.mes)) RV.mes = meses.find(m => R.despesas.some(x => x.data.slice(0, 7) === m)) || hoje;
-  return `<div class="cartao" id="rdvCard"${temRelatorios() ? ' style="margin-top:12px"' : ''}>
-    <div class="tit"><span class="ico"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5M10 13h6M10 17h6"/></svg></span><span><b>RDV Aneethun e UniTudo</b><small>Um PDF por empresa no mês</small></span></div>
-    <div class="meses" role="group" aria-label="Mês do RDV">${meses.map(m => `<button type="button" class="chip" data-rvmes="${m}" aria-pressed="${m === RV.mes}">${MES[+m.slice(5) - 1].replace(/^./, c => c.toUpperCase())} ${m.slice(0, 4)}</button>`).join('')}</div>
-    ${R.grupos.map(g => { const l = R.despesas.filter(x => x.grupo === g.chave && x.data.slice(0, 7) === RV.mes), t = l.reduce((a, x) => a + x.valor, 0);
-      return `<div class="unid" style="cursor:default"><span class="t"><b>${esc(g.titulo)}</b><small>${!g.achado ? `<span style="color:var(--warn)">Plano “${esc(g.plano)}” não existe no painel</span>` : l.length ? `${l.length} despesa${l.length === 1 ? '' : 's'} · ${brl(t)}` : 'Nenhuma despesa neste mês'}</small></span>
-        <button type="button" class="btn ${l.length ? 'pri' : 'sec'}" style="min-height:38px;padding:0 14px;font-size:13px;width:auto;flex:none" data-rv="${esc(g.chave)}" ${l.length && g.achado ? '' : 'disabled'}>Gerar PDF</button></div>`; }).join('')}
-  </div>`;
-}
-function ligarRdv() {
-  document.querySelectorAll('[data-rvmes]').forEach(b => b.onclick = () => { RV.mes = b.dataset.rvmes; tela(); });
-  document.querySelectorAll('[data-rv]').forEach(b => b.onclick = () => {
-    const R = ST.dados.rdv, g = R.grupos.find(x => x.chave === b.dataset.rv), l = R.despesas.filter(x => x.grupo === g.chave && x.data.slice(0, 7) === RV.mes);
-    const f = abrirFolha(`<div class="folha-cab"><h3>RDV ${esc(g.titulo)}<span class="mini">${MES[+RV.mes.slice(5) - 1]}/${RV.mes.slice(0, 4)}</span></h3></div><div class="folha-corpo det">
-      <span class="mini">${l.length} despesa${l.length === 1 ? '' : 's'} · total ${brl(l.reduce((a, x) => a + x.valor, 0))} · ${esc(g.empresa)}</span>
-      <div class="campo"><label class="rot" for="rvAd">Adiantamento recebido</label><input class="busca" id="rvAd" inputmode="numeric" value="${brl(0)}"></div>
-      <span class="mini" id="rvErro" role="alert" style="color:var(--neg);font-weight:700"></span>
-      <button type="button" class="btn pri" id="rvOk">Gerar PDF</button></div>`);
-    let ad = 0; dinheiro(f.querySelector('#rvAd'), c => { ad = c; });
-    f.querySelector('#rvOk').onclick = () => gerarPdf({ tipo: 'simples', grupo: g.chave, mes: RV.mes, adiantamento: ad }, f.querySelector('#rvOk'), f.querySelector('#rvErro'));
-  });
-}
-const RL = { mes: '', sel: null };
+/* ---------- Aba RDV: filtro de ano e mês, um ícone por relatório (Farid, Aneethun ES, Aneethun BH, UniTudo) ---------- */
+/* Farid: quem tem relatórios (um PDF e um reembolso por unidade). Aneethun/UniTudo: administradores (modelo clássico). */
+const RL = { mes: '', sel: null, tela: null };
 const brl0 = c => 'R$ ' + String(Math.round(c / 100)).replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+const ddmm = iso => iso.slice(8, 10) + '/' + iso.slice(5, 7);
+const ddmmaaaa = iso => ddmm(iso) + '/' + iso.slice(0, 4);
+const nomeMes = m => MES[+m.slice(5) - 1].replace(/^./, c => c.toUpperCase()) + ' ' + m.slice(0, 4);
+const plural = (n, s, p) => n + ' ' + (n === 1 ? s : p);
 function unidadesDoMes(mes) {
   const g = {};
   ST.dados.relatorios.despesas.filter(x => x.data.slice(0, 7) === mes).forEach(x => { const k = x.unidadeId || ''; (g[k] = g[k] || { id: k, nome: x.unidade || 'Sem unidade', l: [] }).l.push(x); });
   return Object.values(g).sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
 }
-/** Aba RDV: Farid (quem tem relatórios) e Aneethun/UniTudo (administradores). */
-function telaRel() {
-  if (temRelatorios()) telaRelFarid(); else $('#corpo').innerHTML = '';
-  if (temRdv()) { const ref = $('#rDados'), h = htmlRdv(); if (ref) ref.insertAdjacentHTML('beforebegin', h); else $('#corpo').insertAdjacentHTML('afterbegin', h); ligarRdv(); }
+const ICONES_RDV = { farid: ['F', '#E8EEFB', '#173172'], aneethun_es: ['ES', 'var(--gold-soft)', '#7A5410'], aneethun_bh: ['BH', 'var(--gold-soft)', '#7A5410'], unitudo: ['U', 'var(--ok-bg)', 'var(--ok)'] };
+/** Relatórios que esta pessoa vê, na ordem da tela. */
+function gruposRdvApp() {
+  const out = [];
+  if (temRelatorios()) out.push({ chave: 'farid', titulo: 'Farid', achado: true });
+  if (temRdv()) ST.dados.rdv.grupos.forEach(g => out.push(g));
+  return out;
 }
-function telaRelFarid() {
-  const R0 = ST.dados.relatorios, hoje = hojeISO().slice(0, 7);
-  const meses = [...new Set(R0.despesas.map(x => x.data.slice(0, 7)).concat([hoje]))].sort().reverse();
-  if (!meses.includes(RL.mes)) RL.mes = meses.find(m => R0.despesas.some(x => x.data.slice(0, 7) === m)) || hoje;
-  const us = unidadesDoMes(RL.mes); if (!us.some(u => u.id === RL.sel)) RL.sel = us.length ? us[0].id : null;
-  const ano = RL.mes.slice(0, 4), daVerba = R0.despesas.filter(x => x.verba > 0 && x.data.slice(0, 4) === ano);
-  const deb = daVerba.reduce((a, x) => a + x.verba, 0), cred = R0.cfg.credito * 12, noMes = daVerba.filter(x => x.data.slice(0, 7) === RL.mes);
-  const naFila = ST.fila.filter(o => o.tipo === 'salvar').length, sel = us.find(u => u.id === RL.sel);
+const despesasGrupo = ch => ch === 'farid' ? ST.dados.relatorios.despesas : ST.dados.rdv.despesas.filter(x => x.grupo === ch);
+const reembolsoDe = (ch, mes, uid) => (ST.dados.reembolsos || []).find(r => r.grupo === ch && r.mes === mes && (ch !== 'farid' || r.unidadeId === uid)) || null;
+/** O que se reembolsa no mês: Farid = cada unidade; os outros = um só. {id, nome, l, total, rec} */
+function itensRdv(g, mes) {
+  const its = g.chave === 'farid' ? unidadesDoMes(mes) : (() => { const l = despesasGrupo(g.chave).filter(x => x.data.slice(0, 7) === mes); return l.length ? [{ id: '', nome: g.titulo, l }] : []; })();
+  its.forEach(u => { u.total = u.l.reduce((a, x) => a + x.valor, 0); u.rec = g.chave === 'farid' && !u.id ? null : reembolsoDe(g.chave, mes, u.id); });
+  return its;
+}
+const aReceber = its => its.filter(u => !u.rec).reduce((a, u) => a + u.total, 0);
+function mesesComDespesa() { const s = new Set(); gruposRdvApp().forEach(g => despesasGrupo(g.chave).forEach(x => s.add(x.data.slice(0, 7)))); return s; }
+
+function telaRel() {
+  const hoje = hojeISO().slice(0, 7), comD = mesesComDespesa();
+  if (!/^\d{4}-\d{2}$/.test(RL.mes) || RL.mes > hoje) RL.mes = comD.has(hoje) || !comD.size ? hoje : [...comD].filter(m => m <= hoje).sort().pop() || hoje;
+  const g = RL.tela && gruposRdvApp().find(x => x.chave === RL.tela);
+  if (g) return g.chave === 'farid' ? telaRdvFarid(g) : telaRdvGrupo(g);
+  RL.tela = null; telaRdvInicio(hoje, comD);
+}
+function telaRdvInicio(hoje, comD) {
+  const gs = gruposRdvApp(), ano = RL.mes.slice(0, 4);
+  const anos = [...new Set([...comD].map(m => m.slice(0, 4)).concat([hoje.slice(0, 4), ano]))].filter(a => a <= hoje.slice(0, 4)).sort();
+  const tudoRecebido = m => { const its = gs.flatMap(x => itensRdv(x, m)); return its.length && its.every(u => u.rec); };
+  let todos = 0; [...comD].forEach(m => gs.forEach(x => { todos += aReceber(itensRdv(x, m)); }));
+  const doMes = gs.map(x => ({ g: x, its: itensRdv(x, RL.mes) })), pend = doMes.reduce((a, x) => a + aReceber(x.its), 0);
+  const naFila = ST.fila.filter(o => o.tipo === 'salvar').length;
   $('#corpo').innerHTML = `
-  ${naFila ? `<div class="faixa" role="note"><span><b>${naFila} lançamento${naFila === 1 ? '' : 's'} ainda no celular.</b> Só entram no relatório depois de enviados.</span></div>` : ''}
-  <div class="cartao">
-    <div class="tit"><span class="ico"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 17l4-8 4 5 3-3 7 6"/><path d="M3 21h18"/></svg></span><span><b>Despesas de viagem</b><small>Um PDF por unidade Farid</small></span></div>
-    <div class="meses" role="group" aria-label="Mês">${meses.map(m => `<button type="button" class="chip" data-rmes="${m}" aria-pressed="${m === RL.mes}">${MES[+m.slice(5) - 1].replace(/^./, c => c.toUpperCase())} ${m.slice(0, 4)}</button>`).join('')}</div>
-    ${us.length ? us.map(u => { const sem = u.l.filter(x => !x.tipo).length; return `<button type="button" class="unid" data-runid="${esc(u.id)}" aria-pressed="${u.id === RL.sel}"><span class="t"><b>${esc(u.nome)}</b><small>${u.l.length} despesa${u.l.length === 1 ? '' : 's'}${sem ? ` · <span style="color:var(--warn)">${sem} sem tipo (vai em “Outro”)</span>` : ''}${!u.id ? ' · <span style="color:var(--warn)">corrija a unidade</span>' : ''}</small></span><span class="v">${brl(u.l.reduce((a, x) => a + x.valor, 0))}</span></button>`; }).join('')
-      : '<div class="mini" style="text-align:center;padding:14px">Nenhuma despesa Farid neste mês.</div>'}
-    ${us.length ? `<button type="button" class="btn pri" id="rGerar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>Gerar PDF · ${esc(sel.nome)}</button>
-      ${us.length > 1 ? `<button type="button" class="btn sec" id="rTodos">Gerar todos (${us.length} PDFs)</button>` : ''}` : ''}
-  </div>
-  <div class="cartao">
+  ${naFila ? `<div class="faixa" role="note"><span><b>${plural(naFila, 'lançamento', 'lançamentos')} ainda no celular.</b> Só entram no RDV depois de enviados.</span></div>` : ''}
+  <p class="rdv-rot">Ano</p>
+  <div class="rdv-anos" role="group" aria-label="Ano">${anos.map(a => `<button type="button" class="chip" data-rano="${a}" aria-pressed="${a === ano}">${a}</button>`).join('')}</div>
+  <p class="rdv-rot">Mês</p>
+  <div class="rdv-meses" role="group" aria-label="Mês">${MESC.map((n, i) => { const m = ano + '-' + String(i + 1).padStart(2, '0'), fut = m > hoje, ok = !fut && tudoRecebido(m);
+    return `<button type="button" data-rmes="${m}" aria-pressed="${m === RL.mes}" ${fut ? 'disabled' : ''} ${ok ? 'title="Tudo recebido"' : ''}>${n}${ok ? '<i aria-label="tudo recebido"></i>' : ''}</button>`; }).join('')}</div>
+  <div class="rdv-grade">${doMes.map(({ g, its }) => { const ic = ICONES_RDV[g.chave] || ['•', 'var(--soft)', 'var(--navy)'], tot = its.reduce((a, u) => a + u.total, 0), rec = its.filter(u => u.rec);
+    const info = !g.achado ? `<span style="color:var(--warn)">Plano “${esc(g.plano)}” não existe no painel</span>`
+      : !its.length ? 'Nenhuma despesa<br>neste mês'
+      : g.chave === 'farid' ? `${plural(its.length, 'unidade', 'unidades')} · ${brl(tot)}<br>${rec.length} de ${its.length} recebida${its.length === 1 ? '' : 's'}`
+      : `${plural(its[0].l.length, 'despesa', 'despesas')}<br>${brl(tot)}`;
+    const pill = !its.length ? '' : rec.length === its.length ? `<span class="pill ok">Recebido${its.length === 1 ? ' ' + ddmm(its[0].rec.data) : ''}</span>` : '<span class="pill warn">A receber</span>';
+    return `<button type="button" class="rdv-tile" data-rvg="${esc(g.chave)}"><span class="rdv-ic" style="background:${ic[1]};color:${ic[2]}" aria-hidden="true">${ic[0]}</span><b>${esc(g.titulo)}</b><small>${info}</small>${pill}</button>`; }).join('')}</div>
+  <div class="cartao" style="margin-top:12px"><div class="rdv-total"><span><b>A receber em ${MESC[+RL.mes.slice(5) - 1]}/${ano}</b><small>Todos os meses: ${brl(todos)}</small></span><b class="${pend ? 'warn' : 'ok'}">${brl(pend)}</b></div></div>
+  <p class="mini" style="text-align:center">Gerar PDF e marcar recebido precisam de internet.</p>`;
+  document.querySelectorAll('[data-rano]').forEach(b => b.onclick = () => { const m = b.dataset.rano + RL.mes.slice(4); RL.mes = m > hoje ? hoje : m; tela(); });
+  document.querySelectorAll('[data-rmes]').forEach(b => b.onclick = () => { RL.mes = b.dataset.rmes; tela(); });
+  document.querySelectorAll('[data-rvg]').forEach(b => b.onclick = () => { RL.tela = b.dataset.rvg; tela(); $('#corpo').scrollTop = 0; });
+}
+/** Cabeçalho das telas de cada relatório: título no topo, voltar para os ícones. */
+function topoRdv(g) {
+  $('#titulo').firstChild.textContent = g.titulo; $('#quem').textContent = 'RDV · ' + nomeMes(RL.mes);
+  return `<button type="button" class="rdv-volta" id="rVolta"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>RDV · ${esc(nomeMes(RL.mes))}</button>`;
+}
+const ligarVolta = () => { $('#rVolta').onclick = () => { RL.tela = null; tela(); $('#corpo').scrollTop = 0; }; };
+function cartaoItem(u, gerar, receber, extra) {
+  const r = u.rec, dif = r ? r.valor - u.total : 0;
+  return `<div class="rdv-un">
+    <div class="l1"><b>${esc(u.nome)}</b>${r ? `<span class="pill ok">Recebido ${ddmm(r.data)}</span>` : receber ? '<span class="pill warn">A receber</span>' : ''}</div>
+    <small>${plural(u.l.length, 'despesa', 'despesas')} · ${brl(u.total)}${r ? ` · caiu ${brl(r.valor)}${dif ? ` <span style="color:var(--warn)">(${dif < 0 ? 'faltaram' : 'sobraram'} ${brl(Math.abs(dif))})</span>` : ''}` : ''}${extra || ''}</small>
+    <div class="bt"><button type="button" class="btn sec" data-rpdf="${gerar}">Gerar PDF</button>${receber ? `<button type="button" class="btn ${r ? 'sec' : 'pri verde'}" data-rrec="${receber}">${r ? 'Alterar' : '✓ Recebi'}</button>` : ''}</div>
+  </div>`;
+}
+function telaRdvFarid(g) {
+  const R0 = ST.dados.relatorios, us = itensRdv(g, RL.mes), ano = RL.mes.slice(0, 4);
+  const tot = us.reduce((a, u) => a + u.total, 0), rec = us.filter(u => u.rec), recV = rec.reduce((a, u) => a + u.rec.valor, 0);
+  const daVerba = R0.despesas.filter(x => x.verba > 0 && x.data.slice(0, 4) === ano), deb = daVerba.reduce((a, x) => a + x.verba, 0), cred = R0.cfg.credito * 12, noMes = daVerba.filter(x => x.data.slice(0, 7) === RL.mes);
+  $('#corpo').innerHTML = `${topoRdv(g)}
+  ${us.length ? `<div class="cartao rdv-res"><span><b>Resumo do mês</b><small>${plural(us.length, 'unidade', 'unidades')} · ${rec.length} recebida${rec.length === 1 ? '' : 's'}</small></span><span class="v">Total <b>${brl(tot)}</b>${rec.length ? `<em>Recebido ${brl(recV)}</em>` : ''}</span></div>
+    ${us.map((u, i) => { const sem = u.l.filter(x => !x.tipo).length;
+      return cartaoItem(u, i, u.id ? String(i) : '', `${sem ? `<br><span style="color:var(--warn)">${sem} sem tipo (vai em “Outro”)</span>` : ''}${!u.id ? '<br><span style="color:var(--warn)">Corrija a unidade destes lançamentos para marcar o recebimento</span>' : ''}`); }).join('')}
+    ${us.length > 1 ? `<button type="button" class="btn sec" id="rTodos" style="width:100%;margin-top:10px">Gerar todos (${us.length} PDFs)</button>` : ''}`
+    : '<div class="cartao"><div class="mini" style="text-align:center;padding:10px">Nenhuma despesa Farid neste mês.</div></div>'}
+  <div class="cartao" style="margin-top:12px">
     <div class="tit"><span class="ico"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18M7 15h4"/></svg></span><span><b>Verba diretor ${ano}</b><small>Investimentos c/ Time · acumulado do ano</small></span></div>
     <div class="saldo3"><div><small>Crédito</small><b>${brl0(cred)}</b></div><div><small>Débito</small><b>${brl0(deb)}</b></div><div class="${cred - deb >= 0 ? 'ok' : 'neg'}"><small>Saldo</small><b>${brl0(cred - deb)}</b></div></div>
     <span class="mini">${MESC[+RL.mes.slice(5) - 1]}/${ano}: ${noMes.length} despesa${noMes.length === 1 ? '' : 's'} com verba · ${brl(noMes.reduce((a, x) => a + x.verba, 0))}</span>
     <button type="button" class="btn pri" id="rVerba"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>Gerar PDF da verba ${ano}</button>
   </div>
   <button type="button" class="btn sec" id="rDados" style="width:100%;margin-top:12px">Dados do relatório</button>
-  <p class="mini" style="text-align:center">Gerar precisa de internet. O PDF fica guardado no Drive (8.1.5 - Relatórios Farid).</p>`;
-  document.querySelectorAll('[data-rmes]').forEach(b => b.onclick = () => { RL.mes = b.dataset.rmes; RL.sel = null; tela(); });
-  document.querySelectorAll('[data-runid]').forEach(b => b.onclick = () => { RL.sel = b.dataset.runid; tela(); });
-  const g = $('#rGerar'); if (g) g.onclick = () => folhaGerar(sel);
+  <p class="mini" style="text-align:center">O PDF fica guardado no Drive (8.1.5 - Relatórios Farid).</p>`;
+  ligarVolta();
+  document.querySelectorAll('[data-rpdf]').forEach(b => b.onclick = () => folhaGerar(us[+b.dataset.rpdf]));
+  document.querySelectorAll('[data-rrec]').forEach(b => b.onclick = () => { const u = us[+b.dataset.rrec]; folhaRecebi(g, u, 'Farid · ' + u.nome); });
   const t = $('#rTodos'); if (t) t.onclick = () => gerarTodos(us);
   $('#rVerba').onclick = () => gerarPdf({ tipo: 'verba', ano }, $('#rVerba'));
   $('#rDados').onclick = folhaDadosRel;
+}
+function telaRdvGrupo(g) {
+  const its = itensRdv(g, RL.mes), u = its[0];
+  $('#corpo').innerHTML = `${topoRdv(g)}
+  ${!g.achado ? `<div class="faixa" role="note"><span><b>O plano “${esc(g.plano)}” não existe no painel.</b> Crie com esse nome no painel para os lançamentos entrarem aqui.</span></div>` : ''}
+  ${u ? `${cartaoItem(u, 0, '0', '')}
+    <div class="cartao" style="margin-top:12px;gap:0">${u.l.map(x => `<div class="rdv-lin"><span>${esc(x.desc) || '—'}<small>${ddmm(x.data)}${x.estab ? ' · ' + esc(x.estab) : ''}</small></span><b>${brl(x.valor)}</b></div>`).join('')}
+      <div class="rdv-lin tot"><span>Total do mês</span><b>${brl(u.total)}</b></div></div>`
+    : '<div class="cartao"><div class="mini" style="text-align:center;padding:10px">Nenhuma despesa neste mês.</div></div>'}
+  <p class="mini" style="text-align:center">${esc(g.empresa || '')} · o PDF fica guardado no Drive (8.1.6 - RDV Aneethun e UniTudo).</p>`;
+  ligarVolta();
+  const p = document.querySelector('[data-rpdf]'); if (p) p.onclick = () => folhaRdvSimples(g, u);
+  const r = document.querySelector('[data-rrec]'); if (r) r.onclick = () => folhaRecebi(g, u, g.titulo);
+}
+function folhaRdvSimples(g, u) {
+  const f = abrirFolha(`<div class="folha-cab"><h3>RDV ${esc(g.titulo)}<span class="mini">${MES[+RL.mes.slice(5) - 1]}/${RL.mes.slice(0, 4)}</span></h3></div><div class="folha-corpo det">
+    <span class="mini">${plural(u.l.length, 'despesa', 'despesas')} · total ${brl(u.total)} · ${esc(g.empresa)}</span>
+    <div class="campo"><label class="rot" for="rvAd">Adiantamento recebido</label><input class="busca" id="rvAd" inputmode="numeric" value="${brl(0)}"></div>
+    <span class="mini" id="rvErro" role="alert" style="color:var(--neg);font-weight:700"></span>
+    <button type="button" class="btn pri" id="rvOk">Gerar PDF</button></div>`);
+  let ad = 0; dinheiro(f.querySelector('#rvAd'), c => { ad = c; });
+  f.querySelector('#rvOk').onclick = () => gerarPdf({ tipo: 'simples', grupo: g.chave, mes: RL.mes, adiantamento: ad }, f.querySelector('#rvOk'), f.querySelector('#rvErro'));
+}
+/** "Recebi o dinheiro": data e valor que caiu na conta (começa no total do RDV). Alterar ou desfazer depois. */
+function folhaRecebi(g, u, rotulo) {
+  const r = u.rec, mes = RL.mes;
+  const f = abrirFolha(`<div class="folha-cab"><h3>Recebi o dinheiro</h3></div><div class="folha-corpo det">
+    <span class="mini">${esc(rotulo)} · ${esc(nomeMes(mes))}<br>Total do RDV: ${brl(u.total)}</span>
+    <div class="campo"><label class="rot" for="rbData">Data do recebimento</label><input class="busca" id="rbData" type="date" max="${hojeISO()}" value="${r ? r.data : hojeISO()}"></div>
+    <div class="campo"><label class="rot" for="rbValor">Valor que caiu na conta</label><input class="busca rdv-valor" id="rbValor" inputmode="numeric" value="${brl(r ? r.valor : u.total)}"></div>
+    <div class="resto" id="rbDif" hidden></div>
+    <span class="mini" id="rbErro" role="alert" style="color:var(--neg);font-weight:700"></span>
+    <button type="button" class="btn pri verde" id="rbOk">${r ? 'Salvar alteração' : 'Confirmar recebimento'}</button>
+    ${r ? '<button type="button" class="btn sec" id="rbDesf">Desfazer recebimento</button>' : ''}</div>`);
+  let valor = r ? r.valor : u.total;
+  const dif = () => { const d = valor - u.total, el = f.querySelector('#rbDif'); el.hidden = !d || !valor; el.textContent = d < 0 ? `Faltaram ${brl(-d)} em relação ao total do RDV` : `Veio ${brl(d)} a mais que o total do RDV`; };
+  dinheiro(f.querySelector('#rbValor'), c => { valor = c; dif(); }); dif();
+  const enviar = async (dados, botao) => {
+    const erro = f.querySelector('#rbErro');
+    if (!ST.online) return erro.textContent = 'Sem internet: marcar o recebimento precisa de conexão.';
+    if (!tokenValido()) { fecharFolha(true); return folhaLogin(); }
+    const txt = botao.textContent; botao.disabled = true; botao.textContent = 'Salvando…'; erro.textContent = '';
+    try { const res = await api('reembolso', Object.assign({ grupo: g.chave, mes, unidadeId: u.id }, dados)); ST.dados.reembolsos = res.reembolsos; await guardar('dados'); fecharFolha(); aviso(dados.desfazer ? 'Recebimento desfeito' : 'Recebimento guardado'); tela(); }
+    catch (e) { erro.textContent = e.login ? 'Entre de novo para salvar.' : e.message; botao.disabled = false; botao.textContent = txt; }
+  };
+  f.querySelector('#rbOk').onclick = () => {
+    const data = f.querySelector('#rbData').value;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(data)) return f.querySelector('#rbErro').textContent = 'Informe a data do recebimento.';
+    if (!(valor > 0)) return f.querySelector('#rbErro').textContent = 'Informe o valor que caiu na conta.';
+    enviar({ data, valor }, f.querySelector('#rbOk'));
+  };
+  const d = f.querySelector('#rbDesf'); if (d) d.onclick = () => enviar({ desfazer: true }, d);
 }
 function folhaGerar(u) {
   const f = abrirFolha(`<div class="folha-cab"><h3>Gerar PDF<span class="mini">${esc(u.nome)} · ${MES[+RL.mes.slice(5) - 1]}/${RL.mes.slice(0, 4)}</span></h3></div><div class="folha-corpo det">
@@ -834,16 +919,16 @@ function folhaDadosRel() {
     <span class="mini">Valem para todos que geram os relatórios. Ficam guardados no painel.</span>
     ${campo('nome', 'Nome')}${campo('cargo', 'Cargo')}${campo('depto', 'Departamento')}${campo('origem', 'Origem/Destino')}${campo('motivo', 'Motivo')}${campo('cidade', 'Cidade (assinatura)')}
     <div class="campo"><label class="rot" for="rc_credito">Crédito mensal da verba</label><input class="busca" id="rc_credito" inputmode="numeric" value="${brl(c.credito)}"></div>
-    <span class="mini" id="rcErro" role="alert" style="color:var(--neg);font-weight:700"></span>
+    <span class="mini" id="rbErro" role="alert" style="color:var(--neg);font-weight:700"></span>
     <button type="button" class="btn pri" id="rcOk">Salvar</button></div>`);
   let cred = c.credito; dinheiro(f.querySelector('#rc_credito'), v => { cred = v; });
   f.querySelector('#rcOk').onclick = async () => {
     const b = f.querySelector('#rcOk'), d = { credito: cred }; ['nome', 'cargo', 'depto', 'origem', 'motivo', 'cidade'].forEach(k => { d[k] = f.querySelector('#rc_' + k).value.trim(); });
-    if (Object.values(d).some(v => v === '')) return f.querySelector('#rcErro').textContent = 'Preencha todos os campos.';
-    if (!ST.online || !tokenValido()) return f.querySelector('#rcErro').textContent = !ST.online ? 'Sem internet: salvar precisa de conexão.' : 'Entre de novo para salvar.';
+    if (Object.values(d).some(v => v === '')) return f.querySelector('#rbErro').textContent = 'Preencha todos os campos.';
+    if (!ST.online || !tokenValido()) return f.querySelector('#rbErro').textContent = !ST.online ? 'Sem internet: salvar precisa de conexão.' : 'Entre de novo para salvar.';
     b.disabled = true; b.textContent = 'Salvando…';
     try { const r = await api('relatorio_cfg', d); ST.dados.relatorios.cfg = r.cfg; await guardar('dados'); fecharFolha(); aviso('Dados do relatório salvos'); tela(); }
-    catch (e) { f.querySelector('#rcErro').textContent = e.message; b.disabled = false; b.textContent = 'Salvar'; }
+    catch (e) { f.querySelector('#rbErro').textContent = e.message; b.disabled = false; b.textContent = 'Salvar'; }
   };
 }
 
@@ -909,7 +994,7 @@ function aviso(msg, alerta) {
 
 /* ================================================================== */
 /* Início                                                               */
-document.querySelectorAll('[data-aba]').forEach(b => b.onclick = () => { ST.aba = b.dataset.aba; fecharFolha(true); tela(); $('#corpo').scrollTop = 0; });
+document.querySelectorAll('[data-aba]').forEach(b => b.onclick = () => { if (b.dataset.aba === 'rel') RL.tela = null; ST.aba = b.dataset.aba; fecharFolha(true); tela(); $('#corpo').scrollTop = 0; });
 window.addEventListener('online', () => { ST.online = true; tela(); if (!tokenValido()) renovarLogin(); enviarFila(); atualizar(true); });
 window.addEventListener('offline', () => { ST.online = false; tela(); });
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && ST.sessao) { if (ST.online && !tokenValido()) renovarLogin(); enviarFila(); atualizar(true); } });
