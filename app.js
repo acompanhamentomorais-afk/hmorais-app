@@ -4,7 +4,7 @@
  * - Login Google: o painel confere o login e a lista de e-mails autorizados (nada disso fica aqui).
  */
 'use strict';
-const APP_VERSAO = '11';
+const APP_VERSAO = '12';
 const CFG = window.HM_CONFIG || {};
 
 /* ================================================================== */
@@ -43,7 +43,7 @@ const BD = (() => {
 /* Estado                                                               */
 /*  sessao: {token, exp, email, nome}  · dados: o que o painel mandou (planos, listas, lançamentos, personal)
  *  fila: envios pendentes, na ordem  · recusados: lançamentos que o painel não aceitou (para corrigir)        */
-const ST = { sessao: null, dados: null, fila: [], recusados: [], aba: 'novo', filtro: { mes: '', quem: 'todos', q: '', plano: '', forma: '' }, online: navigator.onLine, erroLogin: '' };
+const ST = { sessao: null, dados: null, dre: null, fila: [], recusados: [], aba: 'novo', filtro: { mes: '', quem: 'todos', q: '', plano: '', forma: '' }, online: navigator.onLine, erroLogin: '' };
 let R = null;                 // rascunho do formulário
 let enviando = false, atualizando = false, gis = false, renovando = null;
 const guardar = (...ks) => Promise.all(ks.map(k => BD.set(k, k === 'rascunho' ? R : ST[k])));
@@ -224,7 +224,7 @@ async function entrou(cred) {
   if (!email) return;
   if (ST.sessao && ST.sessao.email !== email) {
     if (ST.fila.length) { aviso(`Há ${ST.fila.length} envio(s) de ${ST.sessao.email} guardados neste celular. Entre com essa conta para enviar.`, true); return; }
-    ST.dados = null; ST.recusados = []; R = null; await guardar('dados', 'recusados', 'rascunho');
+    ST.dados = null; ST.dre = null; ST.recusados = []; R = null; DV.per = ''; await guardar('dados', 'recusados', 'rascunho', 'dre');
   }
   clearTimeout(renovando); renovando = null;
   ST.sessao = { token: cred, exp: p.exp || 0, email, nome: (ST.sessao && ST.sessao.email === email && ST.sessao.nome) || p.given_name || p.name || '' };
@@ -254,9 +254,9 @@ function nomeAparelho() {
 /** Precisa entrar de novo: sem dados guardados, tela de login; com dados, o app continua e o topo avisa. */
 function pedirLogin() { if (!ST.dados) telaLogin(); else { renovarLogin(); pintaTopo(); } }
 async function sairDeVez(msg) {
-  ST.sessao = null; ST.dados = null; ST.recusados = []; ST.erroLogin = msg || ''; R = null;
+  ST.sessao = null; ST.dados = null; ST.dre = null; ST.recusados = []; ST.erroLogin = msg || ''; R = null; DV.per = ''; Object.keys(DREC).forEach(k => delete DREC[k]);
   try { if (gis) google.accounts.id.disableAutoSelect(); } catch (e) { }
-  await Promise.all([BD.del('sessao'), BD.del('dados'), BD.del('recusados'), BD.del('rascunho')]);
+  await Promise.all([BD.del('sessao'), BD.del('dados'), BD.del('recusados'), BD.del('rascunho'), BD.del('dre')]);
   tela();
 }
 function telaLogin() {
@@ -294,12 +294,17 @@ function tela() {
   if (!ST.dados) { telaSemDados(); return; }
   // (index.html antigo sem alguma aba não pode travar o app)
   const ap = $('#abaPers'), ar = $('#abaRel');
-  if (ap) ap.hidden = !temPersonal(); if (ST.aba === 'pers' && !(ap && temPersonal())) ST.aba = 'novo';
-  if (ar) ar.hidden = !(temRelatorios() || temRdv()); if (ST.aba === 'rel' && !(ar && (temRelatorios() || temRdv()))) ST.aba = 'novo';
-  document.querySelectorAll('[data-aba]').forEach(b => b.setAttribute('aria-current', b.dataset.aba === ST.aba ? 'page' : 'false'));
-  $('#titulo').firstChild.textContent = ST.aba === 'novo' ? (R && R.id ? 'Editar lançamento' : 'Novo lançamento') : ST.aba === 'lista' ? 'Lançamentos' : ST.aba === 'pers' ? 'Personal' : ST.aba === 'rel' ? 'RDV' : 'Conta';
+  if (ap) ap.hidden = !temPersonal();      // index.html antigo (abas separadas)
+  if (ar) ar.hidden = !(temRelatorios() || temRdv());
+  if (ST.aba === 'pers' && !temPersonal()) ST.aba = 'novo';
+  if (ST.aba === 'rel' && !(temRelatorios() || temRdv())) ST.aba = 'novo';
+  if (ST.aba === 'dre' && !temDre()) ST.aba = 'novo';
+  if (!temDre() && ST.dre) { ST.dre = null; DV.per = ''; Object.keys(DREC).forEach(k => delete DREC[k]); guardar('dre'); }   // perdeu o acesso: o DRE sai do celular
+  document.querySelectorAll('.abas [data-aba]').forEach(b => b.setAttribute('aria-current', b.dataset.aba === ST.aba ? 'page' : 'false'));
+  const mais = $('#abaMais'); if (mais) mais.setAttribute('aria-current', ABAS_MAIS.includes(ST.aba) ? 'page' : 'false');
+  $('#titulo').firstChild.textContent = ST.aba === 'novo' ? (R && R.id ? 'Editar lançamento' : 'Novo lançamento') : ST.aba === 'lista' ? 'Lançamentos' : ST.aba === 'pers' ? 'Personal' : ST.aba === 'rel' ? 'RDV' : ST.aba === 'dre' ? 'DRE' : 'Conta';
   $('#quem').textContent = ST.dados.usuario ? ST.dados.usuario.nome : '';
-  if (ST.aba === 'novo') telaNovo(); else if (ST.aba === 'lista') telaLista(); else if (ST.aba === 'pers') telaPers(); else if (ST.aba === 'rel') telaRel(); else telaConta();
+  if (ST.aba === 'novo') telaNovo(); else if (ST.aba === 'lista') telaLista(); else if (ST.aba === 'pers') telaPers(); else if (ST.aba === 'rel') telaRel(); else if (ST.aba === 'dre') telaDre(); else telaConta();
 }
 const faixaTeste = () => ST.dados.modoTeste ? '<div class="faixa" role="note"><span><b>Modo teste.</b> O que for lançado aqui fica no app e no painel, mas ainda não entra na conciliação nem na DRE.</span></div>' : '';
 
@@ -953,6 +958,266 @@ function telaConta() {
   };
 }
 
+/* ================================================================== */
+/* Menu "Mais": RDV, DRE, Personal e Conta (janela que sobe)            */
+const ABAS_MAIS = ['rel', 'dre', 'pers', 'conta'];
+const temDre = () => ehAdmin();
+const IC_MAIS = {
+  rel: '<path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5M10 13h6M10 17h6"/>',
+  dre: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
+  pers: '<path d="M3 10v4M6 8v8M18 8v8M21 10v4M6 12h12"/>',
+  conta: '<circle cx="12" cy="8" r="4"/><path d="M4 20a8 8 0 0 1 16 0"/>'
+};
+const milCurto = c => { const v = c / 100, a = Math.abs(v); return a >= 1000 ? (v / 1000).toLocaleString('pt-BR', { maximumFractionDigits: 1 }) + ' mil' : v.toLocaleString('pt-BR', { maximumFractionDigits: 0 }); };
+/** O que aparece no "Mais" para esta pessoa, com um número de cada. */
+function itensMais() {
+  const out = [];
+  if (temRelatorios() || temRdv()) {
+    let t = 0; try { [...mesesComDespesa()].forEach(m => gruposRdvApp().forEach(g => { t += aReceber(itensRdv(g, m)); })); } catch (e) { }
+    out.push({ aba: 'rel', t: 'RDV', s: t ? 'R$ ' + milCurto(t) + ' a receber' : 'Nada a receber', cor: 'c1' });
+  }
+  if (temDre()) {
+    const D = ST.dre; let s = 'Resultado';
+    if (D && D.totais) { const r = totalPer(D.totais, D.per); s = (r.rec - r.desp >= 0 ? '+' : '−') + ' R$ ' + milCurto(Math.abs(r.rec - r.desp)); }
+    out.push({ aba: 'dre', t: 'DRE', s, cor: 'c2' });
+  }
+  if (temPersonal()) {
+    let n = 0; try { const P = vista().pers; n = P.locais.filter(l => l.ativo).reduce((a, l) => a + resumoLocal(P, l.id).saldo, 0); } catch (e) { }
+    out.push({ aba: 'pers', t: 'Personal', s: plural(n, 'aula', 'aulas'), cor: 'c3' });
+  }
+  out.push({ aba: 'conta', t: 'Conta', s: ((ST.dados.usuario || {}).nome || '').split(' ')[0] || 'Sessão', cor: 'c4' });
+  return out;
+}
+function folhaMais() {
+  if (!ST.dados) return;
+  const its = itensMais();
+  const f = abrirFolha(`<div class="folha-cab"><h3>Mais</h3></div><div class="folha-corpo mais-folha" style="grid-template-columns:repeat(${Math.max(its.length, 2)},1fr)">
+    ${its.map(x => `<button type="button" class="mais-it" data-aba="${x.aba}" aria-current="${ST.aba === x.aba ? 'page' : 'false'}"><span class="mais-ic ${x.cor}"><svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${IC_MAIS[x.aba]}</svg></span><b>${x.t}</b><small>${esc(x.s)}</small></button>`).join('')}</div>`);
+  f.querySelectorAll('[data-aba]').forEach(b => b.onclick = () => irAba(b.dataset.aba));
+}
+function irAba(aba) {
+  if (aba === 'rel') RL.tela = null;
+  if (aba === 'dre') { DV.plano = null; if (ST.dre && ST.online && Date.now() - (DV.buscadoEm || 0) > 5 * 60e3) carregarDre(DV.per || ST.dre.per); }
+  ST.aba = aba; fecharFolha(true); tela(); $('#corpo').scrollTop = 0;
+}
+
+/* ================================================================== */
+/* DRE (administradores): o mesmo DRE do painel, numa versão para o celular */
+/* Os números vêm calculados do painel; sem internet, fica o último DRE carregado (só consulta). */
+const DV = { per: '', lado: 'desp', plano: null, abertos: new Set(), carregando: false, erro: '', buscadoEm: 0 };
+const DREC = {};            // DRE já buscados nesta abertura do app (por período)
+const SEM_DRE = 'Sem classificação';
+const ehAnoPer = p => p.length === 4;
+const mesSoma = (ym, n) => { let [y, m] = ym.split('-').map(Number); m += n; while (m > 12) { m -= 12; y++; } while (m < 1) { m += 12; y--; } return y + '-' + String(m).padStart(2, '0'); };
+const nomePer = p => ehAnoPer(p) ? 'Ano ' + p : MESC[+p.slice(5) - 1] + '/' + p.slice(2, 4);
+function totalPer(tot, p) { let rec = 0, desp = 0, tem = false; Object.keys(tot).forEach(m => { if (ehAnoPer(p) ? m.slice(0, 4) === p : m === p) { rec += tot[m][0]; desp += tot[m][1]; tem = true; } }); return { rec, desp, tem }; }
+const pctBr = (v, d = 1) => (v * 100).toLocaleString('pt-BR', { minimumFractionDigits: d, maximumFractionDigits: d }) + '%';
+/** Uma entrada por conta (dividida: uma por parte, cada uma no seu plano), como no painel. */
+const movsDre = D => D.linhas.flatMap(l => l.dv ? l.dv.map((p, i) => ({ l, pl: p.plano, v: (l.v < 0 ? -1 : 1) * p.v, parte: i + 1 })) : [{ l, pl: l.pl || '', v: l.v }]);
+const planoDoLadoDre = (D, nome, lado) => D.planos.find(p => p.nome === nome && (lado === 'rec' ? p.tipo !== 'despesa' : p.tipo !== 'receita'));
+
+async function carregarDre(per) {
+  if (DV.carregando) return;
+  if (!ST.online) { DV.erro = ''; if (ST.aba === 'dre') tela(); return; }
+  if (!tokenValido()) { DV.erro = 'Entre de novo para atualizar o DRE.'; if (ST.aba === 'dre') tela(); return; }
+  DV.carregando = true; DV.erro = ''; if (ST.aba === 'dre') tela();
+  try { const d = await api('dre', { per: per || '' }); DREC[d.per] = d; ST.dre = d; DV.per = d.per; DV.buscadoEm = Date.now(); await guardar('dre'); }
+  catch (e) { DV.erro = e.login ? 'Entre de novo para atualizar o DRE.' : e.message; }
+  finally { DV.carregando = false; if (ST.aba === 'dre') tela(); }
+}
+const dreAtual = () => DV.per ? (DREC[DV.per] || (ST.dre && ST.dre.per === DV.per ? ST.dre : null)) : ST.dre;
+
+function telaDre() {
+  if (!DV.per && ST.dre) DV.per = ST.dre.per;
+  const D = dreAtual();
+  if (!D) {
+    if (!DV.carregando && !DV.erro && ST.online) { carregarDre(DV.per); return; }
+    $('#corpo').innerHTML = DV.carregando ? '<div class="dre-carrega"><div class="carregando"><i></i></div><b>Calculando o DRE…</b><span class="mini">Faturas, extratos e classificações do painel. Leva alguns segundos.</span></div>'
+      : `<div class="vazio">${DV.erro ? esc(DV.erro) : !ST.online ? (ST.dre ? `Sem internet: o período ${esc(nomePer(DV.per))} ainda não foi carregado. O último guardado é ${esc(nomePer(ST.dre.per))}.` : 'Sem internet e sem DRE guardado no celular. Conecte para carregar.') : ''}</div>
+        ${ST.dre && DV.per !== ST.dre.per ? `<button type="button" class="btn sec" id="dreVoltaPer" style="width:100%">Ver ${esc(nomePer(ST.dre.per))}</button>` : ''}
+        ${ST.online ? '<button type="button" class="btn pri" id="dreTenta" style="width:100%;margin-top:10px">Tentar de novo</button>' : ''}`;
+    const v = $('#dreVoltaPer'); if (v) v.onclick = () => { DV.per = ST.dre.per; tela(); };
+    const t = $('#dreTenta'); if (t) t.onclick = () => carregarDre(DV.per);
+    return;
+  }
+  if (DV.plano) return telaDrePlano(D);
+  const per = D.per, ehAno = ehAnoPer(per), hoje = hojeISO().slice(0, 7), ano = per.slice(0, 4);
+  const T = totalPer(D.totais, per), res = T.rec - T.desp;
+  const ant = ehAno ? String(+per - 1) : mesSoma(per, -1), TA = totalPer(D.totais, ant), rotAnt = ehAno ? ant : MESC[+ant.slice(5) - 1].toLowerCase();
+  const varia = (a, b, subirBom) => { if (!TA.tem) return { t: ehAno ? 'sem ano anterior' : 'sem mês anterior', c: 'mut' }; if (!b) return { t: a ? 'novo no período' : 'sem variação', c: 'mut' };
+    const d = (a - b) / Math.abs(b); if (Math.abs(d) < 0.005) return { t: '= ' + rotAnt, c: 'mut' }; return { t: (d > 0 ? '▲ ' : '▼ ') + pctBr(Math.abs(d)) + ' vs ' + rotAnt, c: (subirBom ? d > 0 : d < 0) ? 'ok' : 'neg' }; };
+  const difR = res - (TA.rec - TA.desp), vRes = !TA.tem ? varia(0, 0) : Math.abs(difR) < 1 ? { t: '= ' + rotAnt, c: 'mut' } : { t: (difR > 0 ? '▲ ' : '▼ ') + brl(Math.abs(difR)) + ' vs ' + rotAnt, c: difR > 0 ? 'ok' : 'neg' };
+  const marg = T.rec ? res / T.rec : null, margA = TA.tem && TA.rec ? (TA.rec - TA.desp) / TA.rec : null;
+  const vM = marg === null ? { t: 'sem receitas', c: 'mut' } : margA === null ? { t: ehAno ? 'sem ano anterior' : 'sem mês anterior', c: 'mut' } : { t: (marg >= margA ? '▲ ' : '▼ ') + (Math.abs(marg - margA) * 100).toLocaleString('pt-BR', { maximumFractionDigits: 1 }) + ' p.p.', c: marg >= margA ? 'ok' : 'neg' };
+  // filtro: ano + mês (ou o ano inteiro)
+  const mesesD = Object.keys(D.totais).sort(), anos = [...new Set(mesesD.map(m => m.slice(0, 4)).concat([hoje.slice(0, 4), ano]))].filter(a => a <= hoje.slice(0, 4)).sort();
+  // gráfico: 6 meses até o período (ou os meses do ano)
+  const serie = ehAno ? mesesD.filter(m => m.startsWith(per)) : mesesD.filter(m => m <= per).slice(-6);
+  const maxV = Math.max(1, ...serie.map(m => Math.max(D.totais[m][0], D.totais[m][1])));
+  const M = movsDre(D), lado = DV.lado, doLado = M.filter(x => x.l.lado === lado), totLado = doLado.reduce((a, x) => a + x.v, 0);
+  const grupos = {}; doLado.forEach(x => { (grupos[x.pl] = grupos[x.pl] || []).push(x); });
+  const linhaPlano = (nome, l, max, sub) => { const v = l.reduce((a, x) => a + x.v, 0), sem = !nome;
+    return `<button type="button" class="dre-pl${sem ? ' sem' : ''}${sub ? ' sub' : ''}" data-dpl="${esc(nome)}"><span class="a"><span>${sem ? '⚠ ' + SEM_DRE : esc(nome)}</span><b>${brl(v)}</b></span>
+      <small>${plural(l.length, 'conta', 'contas')} · ${pctBr(totLado ? v / totLado : 0)} ${lado === 'rec' ? 'das receitas' : 'das despesas'}${sem ? ' · toque para classificar' : ''}</small>
+      <span class="barra"><i style="width:${Math.max(1, Math.round(Math.max(0, v) / max * 100))}%"></i></span></button>`; };
+  let lista = '';
+  const nomes = Object.keys(grupos).filter(n => n), valor = n => grupos[n].reduce((a, x) => a + x.v, 0);
+  if (lado === 'desp' || !D.fontes.length) {
+    const ord = nomes.sort((a, b) => valor(b) - valor(a)), max = Math.max(1, ...ord.map(valor), grupos[''] ? valor('') : 0);
+    lista = ord.map(n => linhaPlano(n, grupos[n], max)).join('');
+  } else {          // receitas por fonte de receita ▸ planos
+    const fonteDe = n => { const p = planoDoLadoDre(D, n, 'rec'), id = p && p.fonte; return id && D.fontes.some(f => f.id === id) ? id : ''; };
+    const fs = D.fontes.map(f => ({ id: f.id, nome: f.nome, pls: nomes.filter(n => fonteDe(n) === f.id) })).filter(f => f.pls.length).sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+    const semF = nomes.filter(n => !fonteDe(n)); if (semF.length) fs.push({ id: '', nome: 'Sem fonte de receita', pls: semF });
+    const vf = f => f.pls.reduce((a, n) => a + valor(n), 0), maxF = Math.max(1, ...fs.map(vf));
+    lista = fs.map(f => { const ab = DV.abertos.has(f.id), v = vf(f), maxP = Math.max(1, ...f.pls.map(valor));
+      return `<button type="button" class="dre-pl fonte" data-dfonte="${esc(f.id)}" aria-expanded="${ab}"><span class="a"><span><i class="chev">${ab ? '▾' : '▸'}</i>${f.id ? esc(f.nome) : `<em>${esc(f.nome)}</em>`}</span><b>${brl(v)}</b></span>
+        <small>${plural(f.pls.length, 'plano', 'planos')} · ${pctBr(totLado ? v / totLado : 0)} das receitas</small><span class="barra"><i style="width:${Math.max(1, Math.round(v / maxF * 100))}%"></i></span></button>
+        ${ab ? f.pls.sort((a, b) => valor(b) - valor(a)).map(n => linhaPlano(n, grupos[n], maxP, true)).join('') : ''}`; }).join('');
+  }
+  if (grupos['']) lista += linhaPlano('', grupos[''], Math.max(1, totLado));
+  const kpi = (rot, val, v, cls) => `<div class="dre-k${cls ? ' ' + cls : ''}"><span>${rot}</span><b>${val}</b><em class="${v.c}">${esc(v.t)}</em></div>`;
+  $('#corpo').innerHTML = `
+  ${!ST.online ? `<div class="faixa" role="note"><span><b>Sem internet.</b> DRE guardado em ${esc(String(D.em || '').slice(8, 10) + '/' + String(D.em || '').slice(5, 7) + ' ' + String(D.em || '').slice(11, 16))}, só para consulta.</span></div>` : ''}
+  ${DV.erro ? `<div class="faixa erro" role="alert"><span>${esc(DV.erro)}</span></div>` : ''}
+  <div class="dre-filtro">
+    <div class="rdv-anos" role="group" aria-label="Ano">${anos.map(a => `<button type="button" class="chip" data-dano="${a}" aria-pressed="${a === ano}">${a}</button>`).join('')}
+      <button type="button" class="chip dre-anoint" data-dper="${ano}" aria-pressed="${ehAno}">Ano inteiro</button></div>
+    <div class="rdv-meses" role="group" aria-label="Mês">${MESC.map((n, i) => { const m = ano + '-' + String(i + 1).padStart(2, '0'); return `<button type="button" data-dper="${m}" aria-pressed="${m === per}" ${m > hoje ? 'disabled' : ''}>${n}</button>`; }).join('')}</div>
+  </div>
+  ${DV.carregando ? '<div class="dre-atualiza" role="status"><i></i>Atualizando…</div>' : ''}
+  <div class="dre-kpis">
+    ${kpi('Receitas', brl(T.rec), varia(T.rec, TA.rec, true))}${kpi('Despesas', brl(T.desp), varia(T.desp, TA.desp, false))}
+    ${kpi('Resultado', (res < 0 ? '−' : '') + brl(Math.abs(res)), vRes, 'res')}${kpi('Margem', marg === null ? '—' : pctBr(marg), vM)}
+  </div>
+  ${serie.length ? `<div class="dre-graf" style="grid-template-columns:repeat(${Math.max(6, serie.length)},minmax(0,1fr))" aria-label="Receitas e despesas por mês">${serie.map(m => { const [r, d] = D.totais[m], rr = r - d;
+    return `<button type="button" class="dre-col${m === per ? ' sel' : ''}" data-dper="${m}" aria-label="${nomePer(m)}: receitas ${brl(r)}, despesas ${brl(d)}"><span class="res ${rr >= 0 ? 'ok' : 'neg'}">${rr >= 0 ? '+' : '−'}${milCurto(Math.abs(rr))}</span>
+      <span class="par"><i class="r" style="height:${Math.round(Math.max(0, r) / maxV * 74)}px"></i><i class="d" style="height:${Math.round(Math.max(0, d) / maxV * 74)}px"></i></span><span class="m">${MESC[+m.slice(5) - 1]}</span></button>`; }).join('')}</div>
+    <div class="dre-leg"><span><i class="r"></i>Receitas</span><span><i class="d"></i>Despesas</span></div>` : ''}
+  <div class="seg dre-seg" role="group" aria-label="Lado"><button type="button" data-dlado="rec" aria-pressed="${lado === 'rec'}">Receitas</button><button type="button" data-dlado="desp" aria-pressed="${lado === 'desp'}">Despesas</button></div>
+  <div class="dre-lista">${lista || `<div class="vazio">Nenhuma ${lado === 'rec' ? 'receita' : 'despesa'} em ${esc(nomePer(per))}.</div>`}</div>
+  <div class="dre-tot"><span>Total de ${lado === 'rec' ? 'receitas' : 'despesas'}</span><b>${brl(totLado)}</b></div>
+  <p class="mini" style="text-align:center">Mesmos números do DRE do painel. Toque num plano para ver as contas.</p>`;
+  document.querySelectorAll('[data-dano]').forEach(b => b.onclick = () => { const a = b.dataset.dano; let m = ehAno ? a : a + per.slice(4); if (!ehAno && m > hoje) m = hoje; trocarPerDre(m); });
+  document.querySelectorAll('[data-dper]').forEach(b => b.onclick = () => trocarPerDre(b.dataset.dper));
+  document.querySelectorAll('[data-dlado]').forEach(b => b.onclick = () => { DV.lado = b.dataset.dlado; tela(); });
+  document.querySelectorAll('[data-dfonte]').forEach(b => b.onclick = () => { const id = b.dataset.dfonte; DV.abertos.has(id) ? DV.abertos.delete(id) : DV.abertos.add(id); tela(); });
+  document.querySelectorAll('[data-dpl]').forEach(b => b.onclick = () => { DV.plano = { lado, pl: b.dataset.dpl }; tela(); $('#corpo').scrollTop = 0; });
+}
+function trocarPerDre(p) {
+  if (p === DV.per) return;
+  DV.per = p; DV.plano = null; DV.erro = '';
+  if (!DREC[p] && !(ST.dre && ST.dre.per === p)) carregarDre(p); else tela();
+}
+/** Contas de um plano no período. */
+function telaDrePlano(D) {
+  const { lado, pl } = DV.plano, M = movsDre(D).filter(x => x.l.lado === lado && x.pl === pl).sort((a, b) => b.v - a.v);
+  const totLado = movsDre(D).filter(x => x.l.lado === lado).reduce((a, x) => a + x.v, 0), tot = M.reduce((a, x) => a + x.v, 0);
+  $('#titulo').firstChild.textContent = pl || SEM_DRE; $('#quem').textContent = 'DRE · ' + nomePer(D.per);
+  $('#corpo').innerHTML = `<button type="button" class="rdv-volta" id="dreVolta"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>DRE · ${esc(nomePer(D.per))}</button>
+    ${!ST.online ? '<div class="faixa" role="note"><span><b>Sem internet.</b> Só consulta: transferir, dividir e classificar precisam de conexão.</span></div>' : ''}
+    <div class="cartao rdv-res"><span><b>${plural(M.length, 'conta', 'contas')}</b><small>${pctBr(totLado ? tot / totLado : 0)} ${lado === 'rec' ? 'das receitas' : 'das despesas'}</small></span><span class="v"><b style="font-family:var(--f-display);font-size:18px">${brl(tot)}</b></span></div>
+    ${!pl ? '<p class="mini" style="margin:0 4px 8px">Estas contas ainda não têm plano. Toque numa delas para dar a descrição e o plano.</p>' : ''}
+    <div class="cartao dre-contas">${M.map((x, i) => { const l = x.l;
+      return `<button type="button" class="dre-conta" data-dconta="${i}"><span class="t"><b>${esc(l.ds || l.l)}${x.parte ? `<span class="tg">÷ ${x.parte}/${l.dv.length}</span>` : ''}${l.n > 1 ? `<span class="tg">${esc((l.p.match(/(\d+) de (\d+)/) || []).slice(1).join('/') || 'parcela')}</span>` : ''}</b>
+        <small>${ddmm(l.d)} · ${esc(l.c)} · ${l.k === 'fat' ? 'fatura' : 'extrato'}${l.ds && l.ds !== l.l ? ' · ' + esc(l.l) : ''}</small></span><b class="v">${(x.v < 0 ? '−' : '') + brl(Math.abs(x.v))}</b></button>`; }).join('') || '<div class="vazio">Nenhuma conta.</div>'}</div>
+    <p class="mini" style="text-align:center">${pl ? 'Toque numa conta para transferir ou dividir.' : ''}</p>`;
+  $('#dreVolta').onclick = () => { DV.plano = null; tela(); $('#corpo').scrollTop = 0; };
+  document.querySelectorAll('[data-dconta]').forEach(b => b.onclick = () => folhaContaDre(D, M[+b.dataset.dconta].l));
+}
+
+/**
+ * Janela de uma conta do DRE.
+ *  Com plano: Transferir (outro plano) ou Dividir (partes que fecham o valor; dividida: editar ou desfazer).
+ *  Sem plano: descrição da conta + plano (ou dividir).
+ *  Numa compra parcelada, vale para todas as parcelas que estão no painel (como no painel).
+ */
+function folhaContaDre(D, l, E) {
+  const sem = !l.pl && !l.dv, total = Math.abs(l.v), lado = l.lado;
+  E = E || { modo: sem ? 'class' : l.dv ? 'div' : 'transf', desc: l.ds || '', plano: '', dividir: false,
+    partes: l.dv ? l.dv.map(p => ({ plano: p.plano, v: p.v })) : [{ plano: sem ? '' : l.pl, v: total }, { plano: '', v: 0 }], erro: '' };
+  const itens = D.planos.filter(p => p.ativo && (lado === 'rec' ? p.tipo !== 'despesa' : p.tipo !== 'receita')).map(p => ({ v: p.nome, t: p.nome, tag: p.subirAo === 'Não' ? 'sai do DRE' : '' })).sort((a, b) => a.t.localeCompare(b.t, 'pt-BR'));
+  const resto = () => total - E.partes.reduce((a, p) => a + (p.v || 0), 0);
+  const subirNao = n => { const p = D.planos.find(x => x.nome === n); return p && p.subirAo === 'Não'; };
+  const usaPartes = E.modo === 'div' || (E.modo === 'class' && E.dividir);
+  const btnPlano = (attr, nome, vazio) => `<button type="button" class="sel" ${attr}><span class="${nome ? '' : 'vazio'}">${esc(nome || vazio)}</span>${CHEV}</button>`;
+  const partesHtml = () => `<div class="dre-partes">${E.partes.map((p, i) => `<div class="dre-parte">${btnPlano(`data-dpp="${i}" aria-label="Plano da parte ${i + 1}"`, p.plano, 'Escolher plano')}
+      <input class="busca dre-pv" inputmode="numeric" data-dpv="${i}" value="${brl(p.v || 0)}" aria-label="Valor da parte ${i + 1}">
+      <button type="button" class="ic" data-dpt="${i}" ${E.partes.length <= 2 ? 'disabled' : ''} aria-label="Tirar a parte ${i + 1}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>`).join('')}
+    <button type="button" class="lnk" id="dpAdd" ${E.partes.length >= 10 ? 'disabled' : ''}>+ Adicionar plano</button>
+    <div class="resto" id="dpResto" role="status"><span></span><button type="button" class="lnk" id="dpAjusta">Ajustar última parte</button></div></div>`;
+  const f = abrirFolha(`<div class="folha-cab"><h3>${esc(l.ds || l.l)}<span class="mini">${ddmmaaaa(l.d)}</span></h3></div><div class="folha-corpo det dre-folha">
+    <span class="mini">${esc(l.c)} · ${l.k === 'fat' ? 'fatura' : 'extrato'}${l.p ? ' · ' + esc(l.p) : ''}${l.ds && l.ds !== l.l ? ' · ' + esc(l.l) : ''} · <b style="color:var(--navy)">${brl(total)}</b></span>
+    ${l.n > 1 ? `<div class="faixa" role="note"><span>Compra em parcelas: a alteração vale para as <b>${l.n} parcelas</b> que estão no painel.</span></div>` : ''}
+    ${!ST.online ? '<div class="faixa erro" role="alert"><span>Sem internet: alterar o DRE precisa de conexão.</span></div>' : ''}
+    ${E.modo === 'class' ? `<div class="faixa" role="note"><span>Esta conta ainda não tem plano. Coloque uma descrição e escolha o plano.</span></div>
+      <div class="campo"><label class="rot" for="dDesc">Descrição da conta</label><input class="busca" id="dDesc" maxlength="120" value="${esc(E.desc)}" placeholder="Ex.: Aluguel garagem – João" autocomplete="off"></div>
+      ${E.dividir ? `<span class="rot">Planos de contas</span>${partesHtml()}<button type="button" class="lnk" id="dUm">Usar um plano só</button>`
+        : `<div class="campo"><span class="rot">Plano de contas</span>${btnPlano('id="dPlano"', E.plano, 'Escolher plano de contas')}</div><button type="button" class="lnk" id="dDiv">÷ Dividir em mais de um plano</button>`}`
+    : `<div class="seg" role="group" aria-label="O que fazer"><button type="button" data-dmodo="transf" aria-pressed="${E.modo === 'transf'}">⇄ Transferir</button><button type="button" data-dmodo="div" aria-pressed="${E.modo === 'div'}">÷ Dividir</button></div>
+      ${E.modo === 'transf' ? `${l.dv ? '<span class="mini">Esta conta está dividida. Transferir junta tudo num plano só.</span>' : `<span class="mini">Plano atual: <b>${esc(l.pl)}</b></span>`}
+        <div class="campo"><span class="rot">Transferir para</span>${btnPlano('id="dPlano"', E.plano, 'Escolher plano de contas')}</div>
+        ${E.plano && subirNao(E.plano) ? '<div class="faixa" role="note"><span>Pelo cadastro deste plano, a conta passa para Subir? = Não e <b>sai do DRE</b>.</span></div>' : ''}`
+      : partesHtml()}`}
+    <span class="mini" id="dErro" role="alert" style="color:var(--neg);font-weight:700">${esc(E.erro)}</span>
+    <button type="button" class="btn pri" id="dOk" ${ST.online ? '' : 'disabled'}>${E.modo === 'class' ? 'Salvar' : E.modo === 'transf' ? 'Transferir' : l.dv ? 'Salvar divisão' : 'Dividir'}</button>
+    ${E.modo === 'div' && l.dv ? `<button type="button" class="btn sec" id="dDesf" ${ST.online ? '' : 'disabled'}>Desfazer divisão</button>` : ''}</div>`);
+  const reabre = () => folhaContaDre(D, l, E);
+  const dsc = f.querySelector('#dDesc'); if (dsc) dsc.oninput = () => { E.desc = dsc.value; };
+  f.querySelectorAll('[data-dmodo]').forEach(b => b.onclick = () => { E.modo = b.dataset.dmodo; E.erro = ''; reabre(); });
+  const dv = f.querySelector('#dDiv'); if (dv) dv.onclick = () => { E.dividir = true; if (E.plano) E.partes[0].plano = E.plano; reabre(); };
+  const um = f.querySelector('#dUm'); if (um) um.onclick = () => { E.dividir = false; reabre(); };
+  const pb = f.querySelector('#dPlano'); if (pb) pb.onclick = async () => { const v = await escolher('Plano de contas', itens, E.plano); if (v) E.plano = v; E.erro = ''; reabre(); };
+  if (usaPartes) {
+    const pinta = () => { const r = resto(), box = f.querySelector('#dpResto'); box.className = 'resto ' + (r === 0 ? 'ok' : r < 0 ? 'neg' : '');
+      box.querySelector('span').textContent = r === 0 ? 'Distribuído ✓' : r > 0 ? 'Falta distribuir ' + brl(r) : 'Passou do total em ' + brl(-r); f.querySelector('#dpAjusta').hidden = r === 0; };
+    f.querySelectorAll('[data-dpp]').forEach(b => b.onclick = async () => { const i = +b.dataset.dpp, v = await escolher('Plano da parte ' + (i + 1), itens, E.partes[i].plano); if (v) E.partes[i].plano = v; E.erro = ''; reabre(); });
+    f.querySelectorAll('[data-dpv]').forEach(inp => { const i = +inp.dataset.dpv; dinheiro(inp, c => { E.partes[i].v = c; pinta(); }); });
+    f.querySelectorAll('[data-dpt]').forEach(b => b.onclick = () => { E.partes.splice(+b.dataset.dpt, 1); reabre(); });
+    f.querySelector('#dpAdd').onclick = () => { E.partes.push({ plano: '', v: Math.max(0, resto()) }); reabre(); };
+    f.querySelector('#dpAjusta').onclick = () => { const u = E.partes[E.partes.length - 1]; u.v = Math.max(0, u.v + resto()); reabre(); };
+    pinta();
+  }
+  const erro = m => { E.erro = m; f.querySelector('#dErro').textContent = m; };
+  const checaPartes = () => {
+    if (E.partes.some(p => !p.plano)) return 'Escolha o plano de cada parte.';
+    if (new Set(E.partes.map(p => p.plano)).size !== E.partes.length) return 'Cada parte precisa de um plano diferente.';
+    if (E.partes.some(p => !(p.v > 0))) return 'Informe o valor de cada parte.';
+    if (resto() !== 0) return 'A soma das partes precisa fechar ' + brl(total) + '.';
+    return '';
+  };
+  const enviar = async (dados, botao, msg) => {
+    if (!ST.online) return erro('Sem internet: alterar o DRE precisa de conexão.');
+    if (!tokenValido()) { fecharFolha(true); return folhaLogin(); }
+    const txt = botao.textContent; botao.disabled = true; botao.textContent = 'Salvando…'; erro('');
+    try {
+      const r = await api('dre_salvar', Object.assign({ k: l.k, id: l.id, versao: l.ver, per: D.per }, dados));
+      Object.keys(DREC).forEach(k => delete DREC[k]); DREC[r.dre.per] = r.dre; ST.dre = r.dre; DV.per = r.dre.per; DV.buscadoEm = Date.now(); await guardar('dre');
+      fecharFolha(); aviso(msg + (r.alteradas > 1 ? ` · ${r.alteradas} parcelas` : '')); tela();
+    } catch (e) {
+      if (e.conflito) { fecharFolha(); aviso(e.message, true); Object.keys(DREC).forEach(k => delete DREC[k]); carregarDre(D.per); return; }
+      erro(e.login ? 'Entre de novo para salvar.' : e.message); botao.disabled = false; botao.textContent = txt;
+    }
+  };
+  f.querySelector('#dOk').onclick = () => {
+    const b = f.querySelector('#dOk');
+    if (E.modo === 'class') {
+      const desc = (E.desc || '').trim(); if (!desc) return erro('Informe a descrição da conta.');
+      if (E.dividir) { const m = checaPartes(); if (m) return erro(m); return enviar({ op: 'classificar', desc, partes: E.partes }, b, 'Conta classificada'); }
+      if (!E.plano) return erro('Escolha o plano de contas.');
+      return enviar({ op: 'classificar', desc, plano: E.plano }, b, 'Conta classificada');
+    }
+    if (E.modo === 'transf') {
+      if (!E.plano) return erro('Escolha para qual plano transferir.');
+      if (E.plano === l.pl && !l.dv) return erro('A conta já está neste plano.');
+      return enviar({ op: 'transferir', plano: E.plano }, b, 'Transferida para ' + E.plano);
+    }
+    const m = checaPartes(); if (m) return erro(m);
+    enviar({ op: 'dividir', partes: E.partes }, b, 'Dividida em ' + E.partes.length + ' planos');
+  };
+  const df = f.querySelector('#dDesf'); if (df) df.onclick = () => enviar({ op: 'desfazer' }, df, 'Divisão desfeita');
+}
+
 /* ---------- listas de escolha (folha que sobe de baixo) ---------- */
 let folhaFim = null;
 function abrirFolha(html) {
@@ -994,15 +1259,16 @@ function aviso(msg, alerta) {
 
 /* ================================================================== */
 /* Início                                                               */
-document.querySelectorAll('[data-aba]').forEach(b => b.onclick = () => { if (b.dataset.aba === 'rel') RL.tela = null; ST.aba = b.dataset.aba; fecharFolha(true); tela(); $('#corpo').scrollTop = 0; });
+document.querySelectorAll('.abas [data-aba]').forEach(b => b.onclick = () => irAba(b.dataset.aba));
+{ const m = $('#abaMais'); if (m) m.onclick = () => ($('.folha .mais-folha') ? fecharFolha() : folhaMais()); }
 window.addEventListener('online', () => { ST.online = true; tela(); if (!tokenValido()) renovarLogin(); enviarFila(); atualizar(true); });
 window.addEventListener('offline', () => { ST.online = false; tela(); });
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && ST.sessao) { if (ST.online && !tokenValido()) renovarLogin(); enviarFila(); atualizar(true); } });
 setInterval(() => { if (ST.fila.length && ST.online && !enviando) enviarFila(); }, 30000);
 
 (async function iniciar() {
-  const [sessao, dados, fila, recusados, rascunho] = await Promise.all(['sessao', 'dados', 'fila', 'recusados', 'rascunho'].map(k => BD.get(k)));
-  ST.sessao = sessao || null; ST.dados = dados || null; ST.fila = fila || []; ST.recusados = recusados || []; R = rascunho || null;
+  const [sessao, dados, fila, recusados, rascunho, dre] = await Promise.all(['sessao', 'dados', 'fila', 'recusados', 'rascunho', 'dre'].map(k => BD.get(k)));
+  ST.sessao = sessao || null; ST.dados = dados || null; ST.dre = dre || null; ST.fila = fila || []; ST.recusados = recusados || []; R = rascunho || null;
   ST.fila.forEach(o => { if (o.tentou === undefined) o.tentou = false; });
   if (ST.sessao && !ST.dados && ST.online && tokenValido()) $('#corpo').innerHTML = '<div class="carregando"><i></i></div>';
   tela();
