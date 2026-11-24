@@ -4,7 +4,7 @@
  * - Login Google: o painel confere o login e a lista de e-mails autorizados (nada disso fica aqui).
  */
 'use strict';
-const APP_VERSAO = '12';
+const APP_VERSAO = '13';
 const CFG = window.HM_CONFIG || {};
 
 /* ================================================================== */
@@ -43,7 +43,7 @@ const BD = (() => {
 /* Estado                                                               */
 /*  sessao: {token, exp, email, nome}  · dados: o que o painel mandou (planos, listas, lançamentos, personal)
  *  fila: envios pendentes, na ordem  · recusados: lançamentos que o painel não aceitou (para corrigir)        */
-const ST = { sessao: null, dados: null, dre: null, fila: [], recusados: [], aba: 'novo', filtro: { mes: '', quem: 'todos', q: '', plano: '', forma: '' }, online: navigator.onLine, erroLogin: '' };
+const ST = { sessao: null, dados: null, dre: null, fila: [], recusados: [], aba: 'lista', filtro: { mes: '', quem: 'todos', q: '', plano: '', forma: '' }, online: navigator.onLine, erroLogin: '' };
 let R = null;                 // rascunho do formulário
 let enviando = false, atualizando = false, gis = false, renovando = null;
 const guardar = (...ks) => Promise.all(ks.map(k => BD.set(k, k === 'rascunho' ? R : ST[k])));
@@ -296,9 +296,9 @@ function tela() {
   const ap = $('#abaPers'), ar = $('#abaRel');
   if (ap) ap.hidden = !temPersonal();      // index.html antigo (abas separadas)
   if (ar) ar.hidden = !(temRelatorios() || temRdv());
-  if (ST.aba === 'pers' && !temPersonal()) ST.aba = 'novo';
-  if (ST.aba === 'rel' && !(temRelatorios() || temRdv())) ST.aba = 'novo';
-  if (ST.aba === 'dre' && !temDre()) ST.aba = 'novo';
+  if (ST.aba === 'pers' && !temPersonal()) ST.aba = 'lista';
+  if (ST.aba === 'rel' && !(temRelatorios() || temRdv())) ST.aba = 'lista';
+  if (ST.aba === 'dre' && !temDre()) ST.aba = 'lista';
   if (!temDre() && ST.dre) { ST.dre = null; DV.per = ''; Object.keys(DREC).forEach(k => delete DREC[k]); guardar('dre'); }   // perdeu o acesso: o DRE sai do celular
   document.querySelectorAll('.abas [data-aba]').forEach(b => b.setAttribute('aria-current', b.dataset.aba === ST.aba ? 'page' : 'false'));
   const mais = $('#abaMais'); if (mais) mais.setAttribute('aria-current', ABAS_MAIS.includes(ST.aba) ? 'page' : 'false');
@@ -1075,7 +1075,10 @@ function telaDre() {
         <small>${plural(f.pls.length, 'plano', 'planos')} · ${pctBr(totLado ? v / totLado : 0)} das receitas</small><span class="barra"><i style="width:${Math.max(1, Math.round(v / maxF * 100))}%"></i></span></button>
         ${ab ? f.pls.sort((a, b) => valor(b) - valor(a)).map(n => linhaPlano(n, grupos[n], maxP, true)).join('') : ''}`; }).join('');
   }
-  if (grupos['']) lista += linhaPlano('', grupos[''], Math.max(1, totLado));
+  if (grupos['']) lista = linhaPlano('', grupos[''], Math.max(1, totLado)) + lista;     // sem plano sempre em cima: para classificar logo
+  const semL = ['desp', 'rec'].map(ld => { const l = M.filter(x => x.l.lado === ld && !x.pl); return { ld, n: new Set(l.map(x => x.l.k + x.l.id)).size, v: l.reduce((a, x) => a + x.v, 0) }; }).filter(x => x.n);
+  const alerta = semL.length ? `<div class="dre-alerta" role="note"><div class="cab"><b>⚠ Contas sem plano de contas</b><small>Classifique para o DRE ficar completo.</small></div>
+    ${semL.map(x => `<button type="button" class="dre-alerta-it" data-dsem="${x.ld}"><span><b>${x.ld === 'rec' ? 'Receitas' : 'Despesas'}</b> · ${plural(x.n, 'conta', 'contas')}</span><b>${brl(x.v)}</b><span class="seta" aria-hidden="true">›</span></button>`).join('')}</div>` : '';
   const kpi = (rot, val, v, cls) => `<div class="dre-k${cls ? ' ' + cls : ''}"><span>${rot}</span><b>${val}</b><em class="${v.c}">${esc(v.t)}</em></div>`;
   $('#corpo').innerHTML = `
   ${!ST.online ? `<div class="faixa" role="note"><span><b>Sem internet.</b> DRE guardado em ${esc(String(D.em || '').slice(8, 10) + '/' + String(D.em || '').slice(5, 7) + ' ' + String(D.em || '').slice(11, 16))}, só para consulta.</span></div>` : ''}
@@ -1086,6 +1089,7 @@ function telaDre() {
     <div class="rdv-meses" role="group" aria-label="Mês">${MESC.map((n, i) => { const m = ano + '-' + String(i + 1).padStart(2, '0'); return `<button type="button" data-dper="${m}" aria-pressed="${m === per}" ${m > hoje ? 'disabled' : ''}>${n}</button>`; }).join('')}</div>
   </div>
   ${DV.carregando ? '<div class="dre-atualiza" role="status"><i></i>Atualizando…</div>' : ''}
+  ${alerta}
   <div class="dre-kpis">
     ${kpi('Receitas', brl(T.rec), varia(T.rec, TA.rec, true))}${kpi('Despesas', brl(T.desp), varia(T.desp, TA.desp, false))}
     ${kpi('Resultado', (res < 0 ? '−' : '') + brl(Math.abs(res)), vRes, 'res')}${kpi('Margem', marg === null ? '—' : pctBr(marg), vM)}
@@ -1103,6 +1107,7 @@ function telaDre() {
   document.querySelectorAll('[data-dlado]').forEach(b => b.onclick = () => { DV.lado = b.dataset.dlado; tela(); });
   document.querySelectorAll('[data-dfonte]').forEach(b => b.onclick = () => { const id = b.dataset.dfonte; DV.abertos.has(id) ? DV.abertos.delete(id) : DV.abertos.add(id); tela(); });
   document.querySelectorAll('[data-dpl]').forEach(b => b.onclick = () => { DV.plano = { lado, pl: b.dataset.dpl }; tela(); $('#corpo').scrollTop = 0; });
+  document.querySelectorAll('[data-dsem]').forEach(b => b.onclick = () => { DV.lado = b.dataset.dsem; DV.plano = { lado: DV.lado, pl: '' }; tela(); $('#corpo').scrollTop = 0; });
 }
 function trocarPerDre(p) {
   if (p === DV.per) return;
